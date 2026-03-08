@@ -12,6 +12,7 @@ services:
       OPENCLAW_STATE_DIR: /host-openclaw
       OPENCLAW_CONFIG_PATH: /host-openclaw/openclaw.json
       OPENCLAW_CLI_PATH: /usr/local/bin/openclaw
+      OPENCLAW_CLI_ENTRYPOINT: /root/.nvm/versions/node/v22.22.0/lib/node_modules/openclaw/openclaw.mjs
       OPENCLAW_STATUS_PATH: /host-openclaw/workspace/.trash-command-center-20260308-111359/data/gateway-status.json
       OPENCLAW_LOG_DIR: /tmp/openclaw
     volumes:

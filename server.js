@@ -26,6 +26,7 @@ const OPENCLAW_WORKSPACE = process.env.OPENCLAW_WORKSPACE || path.join(OPENCLAW_
 const OPENCLAW_STATUS_PATH = process.env.OPENCLAW_STATUS_PATH || ''
 const OPENCLAW_LOG_DIR = process.env.OPENCLAW_LOG_DIR || '/tmp/openclaw'
 const OPENCLAW_CLI_PATH = process.env.OPENCLAW_CLI_PATH || 'openclaw'
+const OPENCLAW_CLI_ENTRYPOINT = process.env.OPENCLAW_CLI_ENTRYPOINT || '/root/.nvm/versions/node/v22.22.0/lib/node_modules/openclaw/openclaw.mjs'
 const OPENCLAW_STATE_DIR = process.env.OPENCLAW_STATE_DIR || OPENCLAW_ROOT
 const OPENCLAW_CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH || path.join(OPENCLAW_STATE_DIR, 'openclaw.json')
 const TASK_RUN_TIMEOUT_SECONDS = Number(process.env.OPENCLAW_TASK_RUN_TIMEOUT_SECONDS || 180)
@@ -180,6 +181,37 @@ function parseJsonFromText(raw) {
     }
     return null
   }
+}
+
+function resolveOpenClawCommand() {
+  if (OPENCLAW_CLI_ENTRYPOINT && fs.existsSync(OPENCLAW_CLI_ENTRYPOINT)) {
+    return {
+      command: 'node',
+      argsPrefix: [OPENCLAW_CLI_ENTRYPOINT],
+      source: 'entrypoint',
+    }
+  }
+  return {
+    command: OPENCLAW_CLI_PATH,
+    argsPrefix: [],
+    source: 'binary',
+  }
+}
+
+function runOpenClawCli(args, options = {}) {
+  const resolved = resolveOpenClawCommand()
+  const cliEnv = {
+    ...process.env,
+    OPENCLAW_STATE_DIR,
+    OPENCLAW_CONFIG_PATH,
+  }
+  return execFileSync(resolved.command, [...resolved.argsPrefix, ...args], {
+    encoding: 'utf8',
+    timeout: options.timeout || 10000,
+    maxBuffer: options.maxBuffer || 1024 * 1024 * 8,
+    env: cliEnv,
+    stdio: options.stdio || 'pipe',
+  })
 }
 
 function readCommandHistory() {
@@ -673,28 +705,20 @@ function readGatewayStatusFromCli() {
   if (openClawCliAvailable === false) return null
   const now = Date.now()
   if (now - cliStatusCache.checkedAt < 10000) return cliStatusCache.data
-  const cliEnv = {
-    ...process.env,
-    OPENCLAW_STATE_DIR,
-    OPENCLAW_CONFIG_PATH,
-  }
 
   try {
     if (openClawCliAvailable === null) {
-      execFileSync(OPENCLAW_CLI_PATH, ['--version'], { stdio: 'ignore', timeout: 2000, env: cliEnv })
+      runOpenClawCli(['--version'], { stdio: 'ignore', timeout: 3000 })
       openClawCliAvailable = true
     }
-    const output = execFileSync(OPENCLAW_CLI_PATH, ['status', '--json', '--no-color', '--log-level', 'silent'], {
-      encoding: 'utf8',
-      timeout: 10000,
-      env: cliEnv,
-    })
+    const output = runOpenClawCli(['status', '--json', '--no-color', '--log-level', 'silent'], { timeout: 12000 })
     const parsed = parseJsonFromText(output)
     if (!parsed) throw new Error('Failed to parse JSON from openclaw status.')
+    const resolved = resolveOpenClawCommand()
     cliStatusCache = {
       checkedAt: now,
       data: {
-        path: `${OPENCLAW_CLI_PATH} status --json`,
+        path: `${resolved.command}${resolved.argsPrefix.length ? ` ${resolved.argsPrefix.join(' ')}` : ''} status --json`,
         data: parsed,
         source: 'cli',
       },
@@ -1116,20 +1140,11 @@ function spawnOpenClawTask(task) {
   const prompt = buildTaskPrompt(task)
   const beforeState = readAgentSessionsRaw(runtimeAgent)
   const beforeKeys = new Set(Object.keys(beforeState.sessions))
-  const cliEnv = {
-    ...process.env,
-    OPENCLAW_STATE_DIR,
-    OPENCLAW_CONFIG_PATH,
-  }
-
-  const output = execFileSync(
-    OPENCLAW_CLI_PATH,
+  const output = runOpenClawCli(
     ['agent', '--agent', runtimeAgent, `--message=${prompt}`, '--json', '--timeout', String(Math.max(30, TASK_RUN_TIMEOUT_SECONDS))],
     {
-      encoding: 'utf8',
       timeout: Math.max(60000, TASK_RUN_TIMEOUT_SECONDS * 1000 + 10000),
       maxBuffer: 1024 * 1024 * 8,
-      env: cliEnv,
     },
   )
 
@@ -1167,6 +1182,8 @@ app.get('/api/health', (req, res) => {
   const reportsDbReady = fs.existsSync(REPORTS_DB_FILE)
   const memoryReady = fs.existsSync(MEMORY_FILE)
   const cliPathReadable = fs.existsSync(OPENCLAW_CLI_PATH)
+  const cliEntrypointReadable = fs.existsSync(OPENCLAW_CLI_ENTRYPOINT)
+  const cliResolved = resolveOpenClawCommand()
 
   res.json({
     status: 'ok',
@@ -1181,7 +1198,10 @@ app.get('/api/health', (req, res) => {
       reportsDbReady,
       memoryReady,
       cliPathReadable,
+      cliEntrypointReadable,
       cliPath: OPENCLAW_CLI_PATH,
+      cliEntrypoint: OPENCLAW_CLI_ENTRYPOINT,
+      cliResolved: `${cliResolved.command}${cliResolved.argsPrefix.length ? ` ${cliResolved.argsPrefix.join(' ')}` : ''}`,
       dataDir: DATA_DIR,
     },
   })
@@ -1420,9 +1440,11 @@ app.post('/api/tasks/:id/run', (req, res) => {
       },
     })
   } catch (error) {
+    const cliResolved = resolveOpenClawCommand()
+    const cliResolvedText = `${cliResolved.command}${cliResolved.argsPrefix.length ? ` ${cliResolved.argsPrefix.join(' ')}` : ''}`
     const detail =
       error?.code === 'ENOENT'
-        ? `OpenClaw CLI not found at "${OPENCLAW_CLI_PATH}". Mount host CLI into container or set OPENCLAW_CLI_PATH.`
+        ? `OpenClaw CLI executable not found. Resolved command: "${cliResolvedText}".`
         : error?.message || 'Dispatch failed.'
     const failed = updateTask(req.params.id, (task) => ({
       status: task.sessionKey ? task.status : 'blocked',
