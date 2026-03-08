@@ -29,9 +29,11 @@ const OPENCLAW_CLI_PATH = process.env.OPENCLAW_CLI_PATH || 'openclaw'
 const OPENCLAW_CLI_ENTRYPOINT = process.env.OPENCLAW_CLI_ENTRYPOINT || '/root/.nvm/versions/node/v22.22.0/lib/node_modules/openclaw/openclaw.mjs'
 const OPENCLAW_STATE_DIR = process.env.OPENCLAW_STATE_DIR || OPENCLAW_ROOT
 const OPENCLAW_CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH || path.join(OPENCLAW_STATE_DIR, 'openclaw.json')
+const ACTION_BEARER_TOKEN = process.env.ACTION_BEARER_TOKEN || ''
 const TASK_RUN_TIMEOUT_SECONDS = Number(process.env.OPENCLAW_TASK_RUN_TIMEOUT_SECONDS || 180)
 const STATUS_FILE_STALE_MS = Number(process.env.OPENCLAW_STATUS_STALE_MS || 60000)
 const REPORT_TIMEZONE = process.env.REPORT_TIMEZONE || 'Asia/Jakarta'
+const GATEWAY_MIRROR_FILE = process.env.OPENCLAW_GATEWAY_MIRROR_FILE || path.join(DATA_DIR, 'gateway-status.json')
 const ARTIFACT_EXTENSIONS = new Set(['.md', '.json', '.log', '.pdf'])
 const ARTIFACT_IGNORE_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.cache'])
 const ARTIFACT_DENY_PATTERNS = [/secret/i, /token/i, /credential/i, /password/i, /\.env/i, /private[-_.]?key/i]
@@ -59,8 +61,23 @@ const DEFAULT_SETTINGS = {
   incidentChannel: '#ops-alerts',
   primaryModel: 'gpt5.4-inv',
   fallbackModel: 'gpt5.3-fast',
-  maxAutoRuns: '4',
+  maxAutoRuns: 4,
   budgetGuardrail: '$120/day',
+}
+
+const SETTINGS_SCHEMA = {
+  organizationName: 'string',
+  defaultWorkspace: 'string',
+  region: 'string',
+  timeFormat: 'string',
+  criticalAlerts: 'string',
+  approvalReminders: 'string',
+  digestSummary: 'string',
+  incidentChannel: 'string',
+  primaryModel: 'string',
+  fallbackModel: 'string',
+  maxAutoRuns: 'number',
+  budgetGuardrail: 'string',
 }
 
 const AGENT_DEFINITIONS = [
@@ -108,6 +125,7 @@ function ensureDataStore() {
   if (!fs.existsSync(TASKS_FILE)) fs.writeFileSync(TASKS_FILE, '[]\n')
   if (!fs.existsSync(SETTINGS_FILE)) fs.writeFileSync(SETTINGS_FILE, `${JSON.stringify(DEFAULT_SETTINGS, null, 2)}\n`)
   if (!fs.existsSync(COMMANDS_FILE)) fs.writeFileSync(COMMANDS_FILE, '[]\n')
+  if (!fs.existsSync(GATEWAY_MIRROR_FILE)) fs.writeFileSync(GATEWAY_MIRROR_FILE, '{}\n')
   if (!fs.existsSync(MEMORY_FILE)) {
     fs.writeFileSync(
       MEMORY_FILE,
@@ -162,6 +180,65 @@ function readJsonSafe(file, fallback) {
 
 function writeJson(file, value) {
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`)
+}
+
+function isObject(value) {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
+}
+
+function hasGatewayShape(value) {
+  return isObject(value) && (Array.isArray(value.channelSummary) || isObject(value.gateway) || isObject(value.sessions))
+}
+
+function coerceSettingValue(key, value) {
+  const type = SETTINGS_SCHEMA[key]
+  if (!type) return value
+  if (type === 'number') {
+    if (typeof value === 'number' && Number.isFinite(value)) return value
+    const parsed = Number(value)
+    return Number.isFinite(parsed) ? parsed : DEFAULT_SETTINGS[key]
+  }
+  if (type === 'boolean') {
+    if (typeof value === 'boolean') return value
+    if (String(value).toLowerCase() === 'true') return true
+    if (String(value).toLowerCase() === 'false') return false
+    return Boolean(DEFAULT_SETTINGS[key])
+  }
+  if (value === null || value === undefined) return ''
+  return String(value).slice(0, 180)
+}
+
+function normalizeSettingsObject(raw = {}) {
+  const normalized = { ...DEFAULT_SETTINGS, ...(isObject(raw) ? raw : {}) }
+  for (const key of Object.keys(SETTINGS_SCHEMA)) {
+    normalized[key] = coerceSettingValue(key, normalized[key])
+  }
+  return normalized
+}
+
+function readSettings() {
+  const raw = readJsonSafe(SETTINGS_FILE, DEFAULT_SETTINGS)
+  const normalized = normalizeSettingsObject(raw)
+  if (JSON.stringify(raw) !== JSON.stringify(normalized)) {
+    writeJson(SETTINGS_FILE, normalized)
+  }
+  return normalized
+}
+
+function writeGatewayMirror(data, source) {
+  if (!hasGatewayShape(data)) return
+  const snapshot = {
+    ...data,
+    _meta: {
+      source,
+      mirroredAt: new Date().toISOString(),
+    },
+  }
+  try {
+    writeJson(GATEWAY_MIRROR_FILE, snapshot)
+  } catch {
+    // ignore mirror write failures and continue with in-memory status
+  }
 }
 
 function parseJsonFromText(raw) {
@@ -257,6 +334,12 @@ function checkActionRateLimit(req, windowMs = 60000, maxHits = 120) {
 function enforceActionGuard(req, res, next) {
   if (!checkActionRateLimit(req)) {
     return res.status(429).json({ error: 'Too many action requests. Retry in a minute.' })
+  }
+  if (ACTION_BEARER_TOKEN) {
+    const auth = String(req.headers.authorization || '')
+    if (auth !== `Bearer ${ACTION_BEARER_TOKEN}`) {
+      return res.status(401).json({ error: 'Missing or invalid bearer token for action endpoint.' })
+    }
   }
   if (!sameOriginRequest(req)) {
     return res.status(403).json({ error: 'Cross-origin action request is blocked.' })
@@ -674,6 +757,7 @@ function discoverGatewayStatusPath() {
   if (now - statusCache.checkedAt < 10000) return statusCache
 
   const candidates = []
+  if (fs.existsSync(GATEWAY_MIRROR_FILE)) candidates.push(GATEWAY_MIRROR_FILE)
   if (OPENCLAW_STATUS_PATH) candidates.push(OPENCLAW_STATUS_PATH)
   candidates.push(...listStatusCandidates(OPENCLAW_WORKSPACE))
 
@@ -776,7 +860,8 @@ function readGatewayStatus() {
   const discovered = discoverGatewayStatusPath()
   const gatewayPath = discovered.path
   const gatewayFileData = gatewayPath ? readJsonSafe(gatewayPath, null) : null
-  const isFreshFile = gatewayFileData && discovered.mtimeMs > 0 && Date.now() - discovered.mtimeMs <= STATUS_FILE_STALE_MS
+  const fileHasData = hasGatewayShape(gatewayFileData)
+  const isFreshFile = fileHasData && discovered.mtimeMs > 0 && Date.now() - discovered.mtimeMs <= STATUS_FILE_STALE_MS
 
   if (isFreshFile) {
     return {
@@ -788,16 +873,22 @@ function readGatewayStatus() {
 
   const cliStatus = readGatewayStatusFromCli()
   if (cliStatus) {
+    writeGatewayMirror(cliStatus.data, 'cli')
     return {
-      ...cliStatus,
+      path: GATEWAY_MIRROR_FILE,
+      data: cliStatus.data,
+      source: 'cli-mirrored',
       stalePath: gatewayPath,
     }
   }
 
   const sessionFileStatus = readGatewayStatusFromSessionFiles()
   if (sessionFileStatus) {
+    writeGatewayMirror(sessionFileStatus.data, 'session-files')
     return {
-      ...sessionFileStatus,
+      path: GATEWAY_MIRROR_FILE,
+      data: sessionFileStatus.data,
+      source: 'session-mirrored',
       stalePath: gatewayPath,
     }
   }
@@ -805,7 +896,7 @@ function readGatewayStatus() {
   if (!gatewayPath) return { path: null, data: null, source: 'none' }
   return {
     path: gatewayPath,
-    data: gatewayFileData,
+    data: fileHasData ? gatewayFileData : null,
     source: 'stale-file',
   }
 }
@@ -997,7 +1088,7 @@ function getLatestLogLines(limit = 120) {
 function buildOverview() {
   const gateway = readGatewayStatus()
   const sessions = normalizeSessions(gateway.data)
-  const settings = readJsonSafe(SETTINGS_FILE, DEFAULT_SETTINGS)
+  const settings = readSettings()
   const tasks = bootstrapTasks(sessions, settings.defaultWorkspace || 'Ops-Alpha v2')
   const agents = summarizeAgents(sessions)
   const activity = createActivity(tasks, sessions)
@@ -1171,6 +1262,96 @@ function spawnOpenClawTask(task) {
   }
 }
 
+function dispatchTask(taskId, trigger = 'manual-run') {
+  const lookup = updateTask(taskId, (task) => ({
+    agent: AGENT_RUNTIME_MAP[task.agent] ? task.agent : 'main',
+    status: 'assigned',
+    progress: Math.max(5, Number(task.progress || 0)),
+    lastRunAt: new Date().toISOString(),
+    lastRunStatus: 'queued',
+    lastRunError: null,
+  }))
+
+  if (!lookup) {
+    return {
+      statusCode: 404,
+      payload: { error: 'Task not found.' },
+    }
+  }
+
+  try {
+    const dispatch = spawnOpenClawTask(lookup.task)
+    const next = updateTask(taskId, (task) => ({
+      status: 'in-progress',
+      progress: Math.max(15, Number(task.progress || 0)),
+      sessionKey: dispatch.sessionKey,
+      lastRunAt: new Date().toISOString(),
+      lastRunStatus: 'running',
+      lastRunError: null,
+    }))
+    appendCommandHistory({
+      id: `task-run-${Date.now()}`,
+      type: 'task-run',
+      command: `openclaw agent --agent ${lookup.task.agent}`,
+      source: 'task-runner',
+      trigger,
+      taskId: lookup.task.id,
+      taskTitle: lookup.task.title,
+      state: 'running',
+      sessionKey: dispatch.sessionKey,
+      ranAt: new Date().toISOString(),
+    })
+    publishOverview()
+
+    return {
+      statusCode: 200,
+      payload: {
+        ok: true,
+        task: next?.task || lookup.task,
+        dispatch: {
+          sessionKey: dispatch.sessionKey,
+          fallback: Boolean(dispatch.fallback),
+        },
+      },
+    }
+  } catch (error) {
+    const cliResolved = resolveOpenClawCommand()
+    const cliResolvedText = `${cliResolved.command}${cliResolved.argsPrefix.length ? ` ${cliResolved.argsPrefix.join(' ')}` : ''}`
+    const detail =
+      error?.code === 'ENOENT'
+        ? `OpenClaw CLI executable not found. Resolved command: "${cliResolvedText}".`
+        : error?.message || 'Dispatch failed.'
+    const failed = updateTask(taskId, (task) => ({
+      status: task.sessionKey ? task.status : 'blocked',
+      lastRunAt: new Date().toISOString(),
+      lastRunStatus: 'failed',
+      lastRunError: detail,
+    }))
+    appendCommandHistory({
+      id: `task-run-${Date.now()}`,
+      type: 'task-run',
+      command: `openclaw agent --agent ${lookup.task.agent}`,
+      source: 'task-runner',
+      trigger,
+      taskId: lookup.task.id,
+      taskTitle: lookup.task.title,
+      state: 'failed',
+      error: detail,
+      ranAt: new Date().toISOString(),
+    })
+    publishOverview()
+
+    return {
+      statusCode: 500,
+      payload: {
+        error: 'Failed to dispatch real task to OpenClaw.',
+        detail,
+        task: failed?.task || lookup.task,
+      },
+    }
+  }
+}
+
 setInterval(publishOverview, 10000).unref()
 
 app.get('/api/health', (req, res) => {
@@ -1181,6 +1362,7 @@ app.get('/api/health', (req, res) => {
   const logsReadable = fs.existsSync(OPENCLAW_LOG_DIR)
   const reportsDbReady = fs.existsSync(REPORTS_DB_FILE)
   const memoryReady = fs.existsSync(MEMORY_FILE)
+  const gatewayMirrorReady = fs.existsSync(GATEWAY_MIRROR_FILE)
   const cliPathReadable = fs.existsSync(OPENCLAW_CLI_PATH)
   const cliEntrypointReadable = fs.existsSync(OPENCLAW_CLI_ENTRYPOINT)
   const cliResolved = resolveOpenClawCommand()
@@ -1197,6 +1379,8 @@ app.get('/api/health', (req, res) => {
       logsReadable,
       reportsDbReady,
       memoryReady,
+      gatewayMirrorReady,
+      gatewayMirrorFile: GATEWAY_MIRROR_FILE,
       cliPathReadable,
       cliEntrypointReadable,
       cliPath: OPENCLAW_CLI_PATH,
@@ -1271,7 +1455,7 @@ app.post('/api/tasks', (req, res) => {
     id: String(Date.now()),
     title: title.slice(0, 160),
     description: String(body.description || '').slice(0, 400),
-    workspace: String(body.workspace || readJsonSafe(SETTINGS_FILE, DEFAULT_SETTINGS).defaultWorkspace || 'Ops-Alpha v2').slice(0, 120),
+    workspace: String(body.workspace || readSettings().defaultWorkspace || 'Ops-Alpha v2').slice(0, 120),
     agent: String(body.agent || 'main').slice(0, 40),
     priority: TASK_PRIORITIES.has(body.priority) ? body.priority : 'normal',
     status: TASK_STATUSES.has(body.status) ? body.status : 'inbox',
@@ -1300,7 +1484,7 @@ app.post('/api/tasks', (req, res) => {
 
 app.post('/api/tasks/generate', (req, res) => {
   const body = req.body || {}
-  const settings = readJsonSafe(SETTINGS_FILE, DEFAULT_SETTINGS)
+  const settings = readSettings()
   const workspace = String(body.workspace || settings.defaultWorkspace || 'Ops-Alpha v2').slice(0, 120)
   const now = Date.now()
   const nowIso = new Date(now).toISOString()
@@ -1387,6 +1571,16 @@ app.post('/api/tasks/generate', (req, res) => {
   const tasks = readJsonSafe(TASKS_FILE, [])
   tasks.unshift(...generated)
   writeJson(TASKS_FILE, tasks)
+  appendCommandHistory({
+    id: `generate-${Date.now()}`,
+    type: 'generate',
+    command: 'tasks.generate',
+    source: 'kanban',
+    workspace,
+    state: 'success',
+    ranAt: nowIso,
+    count: generated.length,
+  })
   publishOverview()
 
   res.status(201).json({
@@ -1397,106 +1591,49 @@ app.post('/api/tasks/generate', (req, res) => {
 })
 
 app.post('/api/tasks/:id/run', (req, res) => {
-  const lookup = updateTask(req.params.id, (task) => ({
-    agent: AGENT_RUNTIME_MAP[task.agent] ? task.agent : 'main',
-    status: 'assigned',
-    progress: Math.max(5, Number(task.progress || 0)),
-    lastRunAt: new Date().toISOString(),
-    lastRunStatus: 'queued',
-    lastRunError: null,
-  }))
+  const result = dispatchTask(req.params.id, 'manual-run')
+  return res.status(result.statusCode).json(result.payload)
+})
 
-  if (!lookup) return res.status(404).json({ error: 'Task not found.' })
+app.post('/api/tasks/:id/retry', (req, res) => {
+  const result = dispatchTask(req.params.id, 'retry')
+  return res.status(result.statusCode).json(result.payload)
+})
 
-  try {
-    const dispatch = spawnOpenClawTask(lookup.task)
-    const next = updateTask(req.params.id, (task) => ({
-      status: 'in-progress',
-      progress: Math.max(15, Number(task.progress || 0)),
-      sessionKey: dispatch.sessionKey,
-      lastRunAt: new Date().toISOString(),
-      lastRunStatus: 'running',
-      lastRunError: null,
-    }))
-    appendCommandHistory({
-      id: `task-run-${Date.now()}`,
-      type: 'task-run',
-      command: `openclaw agent --agent ${lookup.task.agent}`,
-      source: 'task-runner',
-      taskId: lookup.task.id,
-      taskTitle: lookup.task.title,
-      state: 'running',
-      sessionKey: dispatch.sessionKey,
-      ranAt: new Date().toISOString(),
-    })
-
-    publishOverview()
-    return res.json({
-      ok: true,
-      task: next?.task || lookup.task,
-      dispatch: {
-        sessionKey: dispatch.sessionKey,
-        fallback: Boolean(dispatch.fallback),
-      },
-    })
-  } catch (error) {
-    const cliResolved = resolveOpenClawCommand()
-    const cliResolvedText = `${cliResolved.command}${cliResolved.argsPrefix.length ? ` ${cliResolved.argsPrefix.join(' ')}` : ''}`
-    const detail =
-      error?.code === 'ENOENT'
-        ? `OpenClaw CLI executable not found. Resolved command: "${cliResolvedText}".`
-        : error?.message || 'Dispatch failed.'
-    const failed = updateTask(req.params.id, (task) => ({
-      status: task.sessionKey ? task.status : 'blocked',
-      lastRunAt: new Date().toISOString(),
-      lastRunStatus: 'failed',
-      lastRunError: detail,
-    }))
-    appendCommandHistory({
-      id: `task-run-${Date.now()}`,
-      type: 'task-run',
-      command: `openclaw agent --agent ${lookup.task.agent}`,
-      source: 'task-runner',
-      taskId: lookup.task.id,
-      taskTitle: lookup.task.title,
-      state: 'failed',
-      error: detail,
-      ranAt: new Date().toISOString(),
-    })
-
-    publishOverview()
-    return res.status(500).json({
-      error: 'Failed to dispatch real task to OpenClaw.',
-      detail,
-      task: failed?.task || lookup.task,
-    })
-  }
+app.post('/api/tasks/:id/replay', (req, res) => {
+  const result = dispatchTask(req.params.id, 'replay')
+  return res.status(result.statusCode).json(result.payload)
 })
 
 app.post('/api/tasks/:id/approve', (req, res) => {
-  const lookup = updateTask(req.params.id, (task) => {
-    const canApprove = task.approvalRequired || task.status === 'waiting-review' || task.status === 'in-progress'
-    if (!canApprove) {
-      return {
-        lastRunAt: new Date().toISOString(),
-        lastRunStatus: task.lastRunStatus || 'noop',
-        lastRunError: 'Approve rejected: task is not in approval flow.',
-      }
-    }
-    return {
-      status: 'done',
-      progress: 100,
-      approvalRequired: false,
-      lastRunAt: new Date().toISOString(),
-      lastRunStatus: 'approved',
-      lastRunError: null,
-    }
-  })
-  if (!lookup) return res.status(404).json({ error: 'Task not found.' })
-  if (lookup.task.status === 'done') {
-    const sessions = normalizeSessions(readGatewayStatus().data)
-    upsertDoneTaskReport(lookup.task, sessions)
+  const existing = readTasks().find((task) => task.id === req.params.id)
+  if (!existing) return res.status(404).json({ error: 'Task not found.' })
+  const canApprove = existing.approvalRequired || existing.status === 'waiting-review' || existing.status === 'in-progress'
+  if (!canApprove) {
+    return res.status(409).json({ error: 'Task is not in approval flow.' })
   }
+
+  const lookup = updateTask(req.params.id, () => ({
+    status: 'done',
+    progress: 100,
+    approvalRequired: false,
+    lastRunAt: new Date().toISOString(),
+    lastRunStatus: 'approved',
+    lastRunError: null,
+  }))
+  if (!lookup) return res.status(404).json({ error: 'Task not found.' })
+
+  const sessions = normalizeSessions(readGatewayStatus().data)
+  upsertDoneTaskReport(lookup.task, sessions)
+  appendCommandHistory({
+    id: `approval-${Date.now()}`,
+    type: 'approval',
+    command: `approve task ${lookup.task.id}`,
+    taskId: lookup.task.id,
+    taskTitle: lookup.task.title,
+    state: 'approved',
+    ranAt: new Date().toISOString(),
+  })
   publishOverview()
   return res.json({ ok: true, task: lookup.task })
 })
@@ -1510,6 +1647,15 @@ app.post('/api/tasks/:id/reject', (req, res) => {
     lastRunError: null,
   }))
   if (!lookup) return res.status(404).json({ error: 'Task not found.' })
+  appendCommandHistory({
+    id: `approval-${Date.now()}`,
+    type: 'approval',
+    command: `reject task ${lookup.task.id}`,
+    taskId: lookup.task.id,
+    taskTitle: lookup.task.title,
+    state: 'rejected',
+    ranAt: new Date().toISOString(),
+  })
   publishOverview()
   return res.json({ ok: true, task: lookup.task })
 })
@@ -1541,22 +1687,19 @@ app.patch('/api/tasks/:id', (req, res) => {
 })
 
 app.get('/api/settings', (req, res) => {
-  res.json(readJsonSafe(SETTINGS_FILE, DEFAULT_SETTINGS))
+  res.json(readSettings())
 })
 
 app.patch('/api/settings', (req, res) => {
-  const current = readJsonSafe(SETTINGS_FILE, DEFAULT_SETTINGS)
+  const current = readSettings()
   const merged = { ...current }
   for (const [key, value] of Object.entries(req.body || {})) {
-    if (typeof value === 'string') {
-      merged[key] = value.slice(0, 180)
+    if (Object.hasOwn(SETTINGS_SCHEMA, key)) {
+      merged[key] = coerceSettingValue(key, value)
       continue
     }
-    if (typeof value === 'number' || typeof value === 'boolean' || value === null) {
-      merged[key] = value
-      continue
-    }
-    merged[key] = JSON.stringify(value).slice(0, 180)
+    if (typeof value === 'string') merged[key] = value.slice(0, 180)
+    else merged[key] = value
   }
   writeJson(SETTINGS_FILE, merged)
   publishOverview()

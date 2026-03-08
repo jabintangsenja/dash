@@ -105,13 +105,31 @@ function prettyLabel(value) {
 
 function formatSince(value) {
   if (!value) return 'just now'
-  const diff = Math.max(0, Date.now() - new Date(value).getTime())
+  const ts = new Date(value).getTime()
+  if (!Number.isFinite(ts)) return '-'
+  const diff = Math.max(0, Date.now() - ts)
   const mins = Math.round(diff / 60000)
   if (mins < 1) return 'just now'
   if (mins < 60) return `${mins}m ago`
   const hours = Math.round(mins / 60)
   if (hours < 24) return `${hours}h ago`
   return `${Math.round(hours / 24)}d ago`
+}
+
+function formatJakartaDateTime(value) {
+  if (!value) return '-'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return '-'
+  return new Intl.DateTimeFormat('en-GB', {
+    timeZone: 'Asia/Jakarta',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }).format(date)
 }
 
 function formatBytes(value) {
@@ -222,7 +240,7 @@ function AgentRow({ agent }) {
       <p className="agent-task">{agent.currentTask}</p>
       <div className="agent-meta">
         <small>{agent.model}</small>
-        <small>{agent.updatedAt ? formatSince(agent.updatedAt) : 'No active session'}</small>
+        <small>{agent.updatedAt ? `${formatSince(agent.updatedAt)} | ${formatJakartaDateTime(agent.updatedAt)} WIB` : 'No active session'}</small>
       </div>
     </article>
   )
@@ -780,6 +798,8 @@ function KanbanScreen({ tasks, onOpenTask, onTaskPatch, onCreateTask, onGenerate
     setGenerating(true)
     try {
       await onGenerateTasks(workspaceFilter === 'all' ? WORKSPACE_PRESETS[0] : workspaceFilter)
+    } catch {
+      // command output panel shows the error details
     } finally {
       setGenerating(false)
     }
@@ -1192,18 +1212,18 @@ function SettingsScreen({ settings, onSave }) {
   }, [settings])
 
   const fields = [
-    ['organizationName', 'Organization Name'],
-    ['defaultWorkspace', 'Default Workspace'],
-    ['region', 'Region'],
-    ['timeFormat', 'Time Format'],
-    ['criticalAlerts', 'Critical alerts'],
-    ['approvalReminders', 'Approval reminders'],
-    ['digestSummary', 'Digest summary'],
-    ['incidentChannel', 'Incident channel'],
-    ['primaryModel', 'Primary model'],
-    ['fallbackModel', 'Fallback model'],
-    ['maxAutoRuns', 'Max auto-runs'],
-    ['budgetGuardrail', 'Budget guardrail'],
+    { key: 'organizationName', label: 'Organization Name', type: 'text' },
+    { key: 'defaultWorkspace', label: 'Default Workspace', type: 'text' },
+    { key: 'region', label: 'Region', type: 'text' },
+    { key: 'timeFormat', label: 'Time Format', type: 'text' },
+    { key: 'criticalAlerts', label: 'Critical alerts', type: 'text' },
+    { key: 'approvalReminders', label: 'Approval reminders', type: 'text' },
+    { key: 'digestSummary', label: 'Digest summary', type: 'text' },
+    { key: 'incidentChannel', label: 'Incident channel', type: 'text' },
+    { key: 'primaryModel', label: 'Primary model', type: 'text' },
+    { key: 'fallbackModel', label: 'Fallback model', type: 'text' },
+    { key: 'maxAutoRuns', label: 'Max auto-runs', type: 'number' },
+    { key: 'budgetGuardrail', label: 'Budget guardrail', type: 'text' },
   ]
 
   async function handleSave() {
@@ -1216,10 +1236,17 @@ function SettingsScreen({ settings, onSave }) {
       <div className="main-stack">
         <Card title="Settings" action={savedAt ? <small>Saved at {savedAt}</small> : null}>
           <div className="settings-grid">
-            {fields.map(([key, label]) => (
-              <label key={key}>
-                {label}
-                <input value={draft[key] || ''} onChange={(event) => setDraft((current) => ({ ...current, [key]: event.target.value }))} />
+            {fields.map((field) => (
+              <label key={field.key}>
+                {field.label}
+                <input
+                  type={field.type}
+                  value={draft[field.key] ?? ''}
+                  onChange={(event) => {
+                    const nextValue = field.type === 'number' ? Number(event.target.value || 0) : event.target.value
+                    setDraft((current) => ({ ...current, [field.key]: nextValue }))
+                  }}
+                />
               </label>
             ))}
           </div>
@@ -1266,6 +1293,7 @@ function AppShell() {
   const [error, setError] = useState('')
   const [streamConnected, setStreamConnected] = useState(false)
   const [actionState, setActionState] = useState({ runningTaskId: null })
+  const actionBearerToken = import.meta.env.VITE_ACTION_TOKEN
 
   const apiRequest = useCallback(async (url, options = {}) => {
     const method = String(options.method || 'GET').toUpperCase()
@@ -1278,14 +1306,29 @@ function AppShell() {
         headers['Content-Type'] = 'application/json'
       }
     }
+    if (actionBearerToken) {
+      headers.Authorization = `Bearer ${actionBearerToken}`
+    }
     return fetch(url, { ...options, method, headers })
-  }, [])
+  }, [actionBearerToken])
+
+  const apiJson = useCallback(
+    async (url, options = {}) => {
+      const response = await apiRequest(url, options)
+      const payload = await response.json().catch(() => ({}))
+      if (!response.ok) {
+        throw new Error(payload.detail || payload.error || `Request failed (${response.status})`)
+      }
+      return payload
+    },
+    [apiRequest],
+  )
 
   const loadOverview = useCallback(async () => {
     try {
       const [overviewData, settingsData] = await Promise.all([
-        apiRequest('/api/overview').then((response) => response.json()),
-        apiRequest('/api/settings').then((response) => response.json()),
+        apiJson('/api/overview'),
+        apiJson('/api/settings'),
       ])
       setOverview(overviewData)
       setSettings(settingsData)
@@ -1299,7 +1342,7 @@ function AppShell() {
     } finally {
       setLoading(false)
     }
-  }, [apiRequest, selectedTask])
+  }, [apiJson, selectedTask])
 
   useEffect(() => {
     loadOverview()
@@ -1343,7 +1386,7 @@ function AppShell() {
   }, [loadOverview])
 
   async function patchTask(taskId, patch) {
-    await apiRequest(`/api/tasks/${taskId}`, {
+    await apiJson(`/api/tasks/${taskId}`, {
       method: 'PATCH',
       body: JSON.stringify(patch),
     })
@@ -1352,7 +1395,7 @@ function AppShell() {
 
   async function createTask(title, description, options = {}) {
     if (!title.trim()) return
-    await apiRequest('/api/tasks', {
+    await apiJson('/api/tasks', {
       method: 'POST',
       body: JSON.stringify({
         title,
@@ -1369,30 +1412,26 @@ function AppShell() {
   }
 
   async function saveSettings(nextSettings) {
-    const response = await apiRequest('/api/settings', {
+    const data = await apiJson('/api/settings', {
       method: 'PATCH',
       body: JSON.stringify(nextSettings),
     })
-    const data = await response.json()
     setSettings(data)
   }
 
-  async function runTask(task) {
+  async function runTask(task, action = 'run') {
     setActionState({ runningTaskId: task.id })
     try {
-      const response = await apiRequest(`/api/tasks/${task.id}/run`, {
+      const endpoint = action === 'run' ? 'run' : action
+      const data = await apiJson(`/api/tasks/${task.id}/${endpoint}`, {
         method: 'POST',
       })
-      const data = await response.json()
-      if (!response.ok) {
-        throw new Error(data.detail || data.error || 'Failed to run task.')
-      }
       await loadOverview()
       if (data.task) setSelectedTask(data.task)
-      setCommandOutput(`Run Task success: ${task.title}\nSession: ${data.dispatch?.sessionKey || data.task?.sessionKey || '-'}`)
+      setCommandOutput(`${prettyLabel(action)} success: ${task.title}\nSession: ${data.dispatch?.sessionKey || data.task?.sessionKey || '-'}`)
     } catch (error) {
       await loadOverview()
-      setCommandOutput(`Run Task failed: ${task.title}\n${error.message || 'Unknown error.'}`)
+      setCommandOutput(`${prettyLabel(action)} failed: ${task.title}\n${error.message || 'Unknown error.'}`)
     } finally {
       setActionState({ runningTaskId: null })
     }
@@ -1402,18 +1441,21 @@ function AppShell() {
     const baseCommand = String(commandOverride || command).trim()
     if (!baseCommand) return
 
-    let effectiveCommand = baseCommand
-    if (commandMode !== 'auto' && effectiveCommand.startsWith('openclaw ') && !effectiveCommand.includes('--agent')) {
-      effectiveCommand = `${effectiveCommand} --agent ${commandMode}`
-    }
+    try {
+      let effectiveCommand = baseCommand
+      if (commandMode !== 'auto' && effectiveCommand.startsWith('openclaw ') && !effectiveCommand.includes('--agent')) {
+        effectiveCommand = `${effectiveCommand} --agent ${commandMode}`
+      }
 
-    if (commandOverride) setCommand(baseCommand)
-    const response = await apiRequest('/api/command', {
-      method: 'POST',
-      body: JSON.stringify({ command: effectiveCommand }),
-    })
-    const data = await response.json()
-    setCommandOutput([`$ ${data.command || effectiveCommand}`, data.stdout || '', data.stderr || '', data.error || ''].filter(Boolean).join('\n'))
+      if (commandOverride) setCommand(baseCommand)
+      const data = await apiJson('/api/command', {
+        method: 'POST',
+        body: JSON.stringify({ command: effectiveCommand }),
+      })
+      setCommandOutput([`$ ${data.command || effectiveCommand}`, data.stdout || '', data.stderr || '', data.error || ''].filter(Boolean).join('\n'))
+    } catch (runError) {
+      setCommandOutput(`Command failed: ${runError.message || 'Unknown error.'}`)
+    }
   }
 
   function openTask(task) {
@@ -1454,25 +1496,27 @@ function AppShell() {
   }
 
   async function approveTask(task) {
-    const response = await apiRequest(`/api/tasks/${task.id}/approve`, { method: 'POST' })
-    if (!response.ok) {
-      const data = await response.json().catch(() => ({}))
-      setCommandOutput(`Approve failed: ${data.error || response.statusText}`)
-      return
+    try {
+      await apiJson(`/api/tasks/${task.id}/approve`, { method: 'POST' })
+      await loadOverview()
+      setCommandOutput(`Approved: ${task.title}`)
+    } catch (approveError) {
+      setCommandOutput(`Approve failed: ${approveError.message || 'Unknown error.'}`)
     }
-    await loadOverview()
-    setCommandOutput(`Approved: ${task.title}`)
   }
 
   async function rejectTask(task) {
-    await apiRequest(`/api/tasks/${task.id}/reject`, { method: 'POST' })
-    await loadOverview()
-    setCommandOutput(`Rejected: ${task.title} moved to blocked`)
+    try {
+      await apiJson(`/api/tasks/${task.id}/reject`, { method: 'POST' })
+      await loadOverview()
+      setCommandOutput(`Rejected: ${task.title} moved to blocked`)
+    } catch (rejectError) {
+      setCommandOutput(`Reject failed: ${rejectError.message || 'Unknown error.'}`)
+    }
   }
 
   async function rerunTask(task) {
-    await patchTask(task.id, { status: 'assigned', approvalRequired: false })
-    await runTask(task)
+    await runTask(task, 'retry')
     setSelectedTask(task)
     navigate('/command-center')
   }
@@ -1483,8 +1527,7 @@ function AppShell() {
       setCommandOutput('No lock detected. Nothing to resolve.')
       return
     }
-    await patchTask(lockedTask.id, { status: 'assigned', approvalRequired: false })
-    await runTask(lockedTask)
+    await runTask(lockedTask, 'retry')
     setCommandOutput(`Resolved lock and re-dispatched: ${lockedTask.title}`)
   }
 
@@ -1500,7 +1543,7 @@ function AppShell() {
       setCommandOutput(`Replay skipped: no active task for edge ${edge.id}`)
       return
     }
-    await runTask(routedTask)
+    await runTask(routedTask, 'replay')
     setCommandOutput(`Replay edge ${edge.id} -> task ${routedTask.title}`)
   }
 
@@ -1510,8 +1553,7 @@ function AppShell() {
       setCommandOutput('No blocked task found for retry.')
       return
     }
-    await patchTask(blockedTask.id, { status: 'assigned', approvalRequired: false })
-    await runTask(blockedTask)
+    await runTask(blockedTask, 'retry')
     setCommandOutput(`Retry dispatched: ${blockedTask.title}`)
   }
 
@@ -1524,14 +1566,19 @@ function AppShell() {
   }
 
   async function generateTasks(workspaceName) {
-    const response = await apiRequest('/api/tasks/generate', {
-      method: 'POST',
-      body: JSON.stringify({ workspace: workspaceName }),
-    })
-    const data = await response.json()
-    await loadOverview()
-    const createdCount = Array.isArray(data.items) ? data.items.length : 0
-    setCommandOutput(`AI Generate created ${createdCount} tasks for workspace ${workspaceName}.`)
+    try {
+      const data = await apiJson('/api/tasks/generate', {
+        method: 'POST',
+        body: JSON.stringify({ workspace: workspaceName }),
+      })
+      await loadOverview()
+      const createdCount = Array.isArray(data.items) ? data.items.length : 0
+      if (!createdCount) throw new Error('Backend returned 0 generated tasks.')
+      setCommandOutput(`AI Generate created ${createdCount} tasks for workspace ${workspaceName}.`)
+    } catch (generateError) {
+      setCommandOutput(`AI Generate failed: ${generateError.message || 'Unknown error.'}`)
+      throw generateError
+    }
   }
 
   function handleTopSearchKeyDown(event) {

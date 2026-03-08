@@ -598,26 +598,36 @@ small {
 
 .agent-row {
   gap: 8px;
+  min-width: 0;
 }
 
 .agent-head {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   justify-content: space-between;
   gap: 8px;
+  flex-wrap: wrap;
 }
 
 .agent-task {
   margin: 0;
+  min-width: 0;
   overflow-wrap: anywhere;
-  word-break: break-word;
+  word-break: break-all;
 }
 
 .agent-meta {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  align-items: flex-start;
+  justify-content: flex-start;
+  flex-direction: column;
   gap: 8px;
+  min-width: 0;
+}
+
+.agent-meta small {
+  overflow-wrap: anywhere;
+  word-break: break-all;
 }
 
 .list-plain {
@@ -871,4 +881,3 @@ small {
     grid-template-columns: 1fr;
   }
 }
-
