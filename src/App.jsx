@@ -1,18 +1,71 @@
 ﻿import { useCallback, useEffect, useMemo, useState } from 'react'
-import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
+import { NavLink, Navigate, Route, Routes, useNavigate } from 'react-router-dom'
 import './App.css'
 
 const sideNav = [
   { to: '/dashboard', label: 'Dashboard' },
+  { to: '/coordination', label: 'Coordination' },
   { to: '/command-center', label: 'Command Center' },
   { to: '/kanban', label: 'Kanban' },
   { to: '/artifacts', label: 'Artifacts' },
   { to: '/workspaces', label: 'Workspaces' },
+  { to: '/reports', label: 'Reports' },
   { to: '/activity-logs', label: 'Activity Logs' },
   { to: '/settings', label: 'Settings' },
 ]
 
-const KANBAN_COLUMNS = ['inbox', 'assigned', 'in-progress', 'blocked', 'done']
+const KANBAN_COLUMNS = ['inbox', 'todo', 'in-progress', 'waiting-review', 'blocked', 'done']
+const WORKSPACE_PRESETS = ['Ops-Alpha v2', 'Ops-Beta v1', 'Finance Dashboard']
+const COMMAND_MODES = ['auto', 'coding', 'reasoning', 'vision']
+const POPUP_TABS = ['node', 'edge', 'handoff', 'approval', 'retry']
+
+const FLOW_NODES = [
+  { id: 'user', label: 'User', x: 50, y: 12, tone: 'zeta', static: true },
+  { id: 'main', label: 'Zeta', x: 50, y: 40, tone: 'zeta' },
+  { id: 'coding', label: 'Cyrus', x: 24, y: 74, tone: 'coding' },
+  { id: 'reasoning', label: 'Rheon', x: 50, y: 74, tone: 'reasoning' },
+  { id: 'vision', label: 'Vista', x: 76, y: 74, tone: 'vision' },
+]
+
+const FLOW_EDGES = [
+  { id: 'dispatch-main', from: 'user', to: 'main', label: 'dispatch', tone: 'zeta' },
+  { id: 'main-coding', from: 'main', to: 'coding', label: 'route', tone: 'coding' },
+  { id: 'main-reasoning', from: 'main', to: 'reasoning', label: 'analyze', tone: 'reasoning' },
+  { id: 'main-vision', from: 'main', to: 'vision', label: 'inspect', tone: 'vision' },
+  { id: 'coding-main', from: 'coding', to: 'main', label: 'feedback', tone: 'coding', curved: true },
+  { id: 'reasoning-main', from: 'reasoning', to: 'main', label: 'decision', tone: 'reasoning', curved: true },
+  { id: 'vision-main', from: 'vision', to: 'main', label: 'result', tone: 'vision', curved: true },
+  { id: 'coding-reasoning', from: 'coding', to: 'reasoning', label: 'handoff', tone: 'reasoning', curved: true, low: true },
+  { id: 'reasoning-vision', from: 'reasoning', to: 'vision', label: 'context', tone: 'vision', curved: true, low: true },
+  { id: 'vision-coding', from: 'vision', to: 'coding', label: 'retry', tone: 'error', curved: true, low: true },
+]
+
+const EDGE_DETAILS = {
+  'main-coding': {
+    reason: 'dispatch patch implementation',
+    payload: { from: 'Zeta', to: 'Cyrus', type: 'task.route', intent: 'implement', priority: 'high' },
+  },
+  'main-reasoning': {
+    reason: 'request architecture analysis',
+    payload: { from: 'Zeta', to: 'Rheon', type: 'task.route', intent: 'analyze', priority: 'normal' },
+  },
+  'main-vision': {
+    reason: 'request UI visual verification',
+    payload: { from: 'Zeta', to: 'Vista', type: 'task.route', intent: 'inspect', priority: 'normal' },
+  },
+  'coding-reasoning': {
+    reason: 'handoff for blast-radius validation',
+    payload: { from: 'Cyrus', to: 'Rheon', type: 'handoff', check: 'blast_radius', retries: 0 },
+  },
+  'reasoning-vision': {
+    reason: 'share context for UX consistency',
+    payload: { from: 'Rheon', to: 'Vista', type: 'context_sync', section: 'flow_overview' },
+  },
+  'vision-coding': {
+    reason: 'retry loop due to parse mismatch',
+    payload: { from: 'Vista', to: 'Cyrus', type: 'retry', error: 'parse_mismatch', retries: 2 },
+  },
+}
 
 const toneMap = {
   main: 'zeta',
@@ -33,6 +86,8 @@ const toneMap = {
   done: 'success',
   'in-progress': 'coding',
   assigned: 'vision',
+  todo: 'vision',
+  'waiting-review': 'warning',
   inbox: 'zeta',
   blocked: 'error',
   rate_limited: 'warning',
@@ -57,6 +112,41 @@ function formatSince(value) {
   const hours = Math.round(mins / 60)
   if (hours < 24) return `${hours}h ago`
   return `${Math.round(hours / 24)}d ago`
+}
+
+function formatLocalDateTime(value) {
+  if (!value) return '-'
+  const date = new Date(value)
+  return `${date.toLocaleDateString()} ${date.toLocaleTimeString()}`
+}
+
+function nextInList(list, currentValue) {
+  const index = list.indexOf(currentValue)
+  if (index < 0) return list[0]
+  return list[(index + 1) % list.length]
+}
+
+function kanbanColumnLabel(status) {
+  if (status === 'todo') return 'To Do'
+  if (status === 'waiting-review') return 'Waiting / Review'
+  return prettyLabel(status)
+}
+
+function flowPoint(nodeId) {
+  const node = FLOW_NODES.find((entry) => entry.id === nodeId)
+  return node ? { x: node.x, y: node.y } : { x: 50, y: 50 }
+}
+
+function flowPath(edge) {
+  const start = flowPoint(edge.from)
+  const end = flowPoint(edge.to)
+  if (!edge.curved) {
+    return `M ${start.x} ${start.y} L ${end.x} ${end.y}`
+  }
+  const arc = edge.low ? 18 : -18
+  const cx = (start.x + end.x) / 2
+  const cy = (start.y + end.y) / 2 + arc
+  return `M ${start.x} ${start.y} Q ${cx} ${cy} ${end.x} ${end.y}`
 }
 
 function StatusChip({ text, tone }) {
@@ -154,67 +244,333 @@ function TaskCard({ task, onOpenTask }) {
   )
 }
 
-function DashboardScreen({ overview, onOpenTask, command, setCommand, onRunCommand, commandOutput }) {
-  const activeTasks = overview.tasks.filter((task) => task.status !== 'done').slice(0, 4)
-  const recentSessions = overview.sessions.slice(0, 6).map((session) => ({
-    title: session.title,
-    subtitle: `${prettyLabel(session.agent)} - ${session.model} - ${formatSince(session.updatedAt)}`,
-    state: session.status,
-  }))
+function CoordinationFlow({ overview, selectedNodeId, onSelectNode }) {
+  const agentMap = Object.fromEntries(overview.agents.map((agent) => [agent.id, agent]))
 
   return (
-    <div className="content-grid">
+    <div className="coordination-flow">
+      <svg className="flow-svg" viewBox="0 0 100 100" preserveAspectRatio="none" aria-label="Coordination flow map">
+        <defs>
+          <marker id="flow-arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+            <path d="M0,0 L6,3 L0,6 z" fill="#8ec5ff" />
+          </marker>
+        </defs>
+        {FLOW_EDGES.map((edge) => (
+          <path key={edge.id} d={flowPath(edge)} className={`flow-edge ${toneFor(edge.tone)} ${edge.curved ? 'curved' : ''}`} markerEnd="url(#flow-arrow)" />
+        ))}
+      </svg>
+
+      {FLOW_NODES.map((node) => {
+        const liveAgent = agentMap[node.id]
+        const status = liveAgent?.status || (node.static ? 'active' : 'idle')
+        const isBusy = status === 'active' || status === 'busy'
+        return (
+          <button
+            key={node.id}
+            className={`flow-node ${toneFor(node.tone)} ${selectedNodeId === node.id ? 'selected' : ''} ${isBusy ? 'live' : ''}`}
+            style={{ left: `${node.x}%`, top: `${node.y}%` }}
+            onClick={() => onSelectNode(node.id)}
+          >
+            <span>{liveAgent?.name || node.label}</span>
+            <small>{prettyLabel(status)}</small>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
+function CoordinationScreen({
+  overview,
+  onOpenTask,
+  command,
+  setCommand,
+  onRunCommand,
+  commandOutput,
+  selectedFlowNode,
+  setSelectedFlowNode,
+  onResolveLock,
+  onRunOc219,
+  onJumpToLive,
+  onApproveTask,
+  onRejectTask,
+  onViewEdgePayload,
+  onReplayEdge,
+  onOpenTraceback,
+  onRetryLoop,
+}) {
+  const blockedOrApproval = overview.tasks.filter((task) => task.status === 'blocked' || task.approvalRequired).slice(0, 4)
+  const selectedAgent = overview.agents.find((agent) => agent.id === selectedFlowNode)
+  const selectedAgentTasks = selectedAgent ? overview.tasks.filter((task) => task.agent === selectedAgent.id).slice(0, 3) : []
+  const selectedAgentSession = selectedAgent ? overview.sessions.find((session) => session.agent === selectedAgent.id) : null
+  const [popupTab, setPopupTab] = useState('node')
+  const [selectedEdgeId, setSelectedEdgeId] = useState('coding-reasoning')
+  const selectableEdges = FLOW_EDGES.filter((edge) => edge.id !== 'dispatch-main')
+  const selectedEdge = selectableEdges.find((edge) => edge.id === selectedEdgeId) || selectableEdges[0]
+  const selectedEdgeInfo = EDGE_DETAILS[selectedEdge?.id] || { reason: 'No payload details.', payload: {} }
+
+  return (
+    <div className="content-grid coordination-grid">
       <div className="main-stack">
-        <Card title="Quick Command" action={<small>Safe command runner</small>}>
+        <Card
+          title="Coordination"
+          action={
+            <div className="mini-actions">
+              <button className="btn-ghost" onClick={onRunOc219}>
+                RUN OC-219
+              </button>
+              <button className="btn-success" onClick={onJumpToLive}>
+                LIVE STREAM
+              </button>
+            </div>
+          }
+        >
+          <div className="row-between">
+            <p>Unified map + flow + popup lab</p>
+            <div className="chip-wrap">
+              <StatusChip text="AI" tone="zeta" />
+              <StatusChip text="Only Active" tone="coding" />
+              <StatusChip text="Only Retry" tone="error" />
+              <StatusChip text="Only Agent-to-Agent" tone="reasoning" />
+            </div>
+          </div>
+        </Card>
+
+        <Card title="Unified Coordination Flow" action={<button className="btn-danger" onClick={onResolveLock}>Resolve lock</button>}>
+          <div className="conflict-banner">Conflict detected: Cyrus and Vista are editing retry.patch concurrently.</div>
+          <CoordinationFlow overview={overview} selectedNodeId={selectedFlowNode} onSelectNode={setSelectedFlowNode} />
+        </Card>
+
+        <Card title="Mission HUD">
+          <div className="row-between">
+            <input className="search-input" value={command} onChange={(event) => setCommand(event.target.value)} />
+            <button className="btn-primary" onClick={onRunCommand}>Run</button>
+          </div>
+          <pre className="code-box">{commandOutput || 'No command executed yet.'}</pre>
+          <div className="cards-2">
+            <Card title="Selected Node">
+              <p>{selectedAgent?.name || 'User'} | {selectedAgent?.status || 'active'}</p>
+              <small>{selectedAgent?.currentTask || 'Incoming dispatch'}</small>
+            </Card>
+            <Card title="Attention Queue">
+              <div className="stack-gap">
+                {blockedOrApproval.length ? blockedOrApproval.map((task) => (
+                  <button key={task.id} className="btn-ghost full-width" onClick={() => onOpenTask(task)}>
+                    {task.title}
+                  </button>
+                )) : <small>No pending attention.</small>}
+              </div>
+            </Card>
+          </div>
+        </Card>
+      </div>
+
+      <aside className="right-stack">
+        <Card title="Popup Lab" action={<small>Node / Edge / Handoff / Approval / Retry</small>}>
+          <div className="mini-actions wrap-actions">
+            {POPUP_TABS.map((tab) => (
+              <button
+                key={tab}
+                className={popupTab === tab ? 'btn-primary' : 'btn-ghost'}
+                onClick={() => {
+                  setPopupTab(tab)
+                  if (tab === 'handoff') setSelectedEdgeId('coding-reasoning')
+                  if (tab === 'retry') setSelectedEdgeId('vision-coding')
+                }}
+              >
+                {prettyLabel(tab)}
+              </button>
+            ))}
+          </div>
+        </Card>
+
+        {popupTab === 'node' && (
+          <Card title="Node Popup" action={<small>{selectedAgent?.name || 'User'}</small>}>
+            {selectedFlowNode === 'user' ? (
+              <div className="stack-gap">
+                <StatusChip text="User Entry" tone="zeta" />
+                <p>Incoming request is routed to Zeta for triage and decomposition.</p>
+                <small>Current workspace: {overview.workspace}</small>
+              </div>
+            ) : selectedAgent ? (
+              <div className="stack-gap">
+                <div className="row-between">
+                  <h4>{selectedAgent.name}</h4>
+                  <StatusChip text={selectedAgent.status} tone={selectedAgent.status} />
+                </div>
+                <p>{selectedAgent.currentTask}</p>
+                <small>Model: {selectedAgent.model}</small>
+                <small>Last update: {selectedAgent.updatedAt ? formatSince(selectedAgent.updatedAt) : 'No active session'}</small>
+                <div className="chip-wrap">
+                  <StatusChip text={`Tasks ${selectedAgentTasks.length}`} tone={selectedAgent.id} />
+                  {selectedAgentSession && <StatusChip text="Session Linked" tone="success" />}
+                </div>
+                <div className="stack-gap">
+                  {selectedAgentTasks.length ? (
+                    selectedAgentTasks.map((task) => (
+                      <button key={task.id} className="btn-ghost full-width" onClick={() => onOpenTask(task)}>
+                        Open: {task.title}
+                      </button>
+                    ))
+                  ) : (
+                    <small>No task currently assigned.</small>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <p>Select a node to inspect details.</p>
+            )}
+          </Card>
+        )}
+
+        {(popupTab === 'edge' || popupTab === 'handoff') && (
+          <Card title={popupTab === 'handoff' ? 'Handoff Popup' : 'Edge Popup'} action={<small>{selectedEdge.from} to {selectedEdge.to}</small>}>
+            <div className="mini-actions wrap-actions">
+              {selectableEdges.map((edge) => (
+                <button key={edge.id} className={selectedEdge.id === edge.id ? 'btn-primary' : 'btn-ghost'} onClick={() => setSelectedEdgeId(edge.id)}>
+                  {edge.label}
+                </button>
+              ))}
+            </div>
+            <p>{selectedEdgeInfo.reason}</p>
+            <pre className="code-box">{JSON.stringify(selectedEdgeInfo.payload, null, 2)}</pre>
+            <div className="mini-actions">
+              <button className="btn-ghost" onClick={() => onViewEdgePayload(selectedEdge, selectedEdgeInfo)}>
+                View payload
+              </button>
+              <button className="btn-ghost" onClick={() => onReplayEdge(selectedEdge, selectedEdgeInfo)}>
+                Replay edge
+              </button>
+            </div>
+          </Card>
+        )}
+
+        {popupTab === 'approval' && (
+          <Card title="Approval Popup" action={<small>{overview.approvals.length} pending</small>}>
+            <div className="stack-gap">
+              {overview.approvals.length ? (
+                overview.approvals.map((task) => (
+                  <article className="approval-item" key={task.id}>
+                    <h5>{task.title}</h5>
+                    <div className="mini-actions">
+                      <button className="btn-success" onClick={() => onApproveTask(task)}>
+                        Approve
+                      </button>
+                      <button className="btn-danger" onClick={() => onRejectTask(task)}>
+                        Reject
+                      </button>
+                      <button className="btn-ghost" onClick={() => onOpenTask(task)}>
+                        Open
+                      </button>
+                    </div>
+                  </article>
+                ))
+              ) : (
+                <p>No approvals pending.</p>
+              )}
+            </div>
+          </Card>
+        )}
+
+        {popupTab === 'retry' && (
+          <Card title="Retry / Error Popup" action={<small>R-14</small>}>
+            <p>Retry loop is active for blocked task and handoff mismatch detection.</p>
+            <div className="mini-actions">
+              <button className="btn-danger" onClick={onOpenTraceback}>
+                Open traceback
+              </button>
+              <button className="btn-danger" onClick={onRetryLoop}>
+                Retry now
+              </button>
+            </div>
+          </Card>
+        )}
+      </aside>
+    </div>
+  )
+}
+
+function DashboardScreen({
+  overview,
+  onOpenTask,
+  command,
+  setCommand,
+  onRunCommand,
+  commandOutput,
+  commandMode,
+  onCycleCommandMode,
+  onAttachCommand,
+  onApproveTask,
+  onRejectTask,
+  onRerunTask,
+  onNewCommand,
+  onOpenArtifacts,
+  onOpenKanban,
+  onJumpToLive,
+}) {
+  const activeTasks = overview.tasks.filter((task) => task.status !== 'done').slice(0, 3)
+  const recentCommands = overview.tasks.slice(0, 3)
+
+  return (
+    <div className="content-grid dashboard-grid">
+      <div className="main-stack">
+        <Card title="Dashboard Control Layer" action={<StatusChip text={`${activeTasks.length} items need attention`} tone="warning" />}>
+          <p>Monitor orchestration, launch commands, resolve approvals.</p>
+        </Card>
+
+        <Card title="Quick Command Input" action={<small>AUTO /vision</small>}>
           <div className="command-box">
             <textarea value={command} onChange={(event) => setCommand(event.target.value)} aria-label="Quick command input" />
             <div className="row-between">
-              <div className="row-inline">
-                <button className="btn-ghost" disabled>
-                  Attach
-                </button>
-                <small>Allowed: openclaw, docker, git, node, npm, pwd, ls, cat, echo</small>
+              <div className="mini-actions wrap-actions">
+                <button className="btn-ghost" onClick={onAttachCommand}>Attach</button>
+                <button className="btn-ghost" onClick={onCycleCommandMode}>Mode: {prettyLabel(commandMode)}</button>
+                <small>/coding /reasoning /kanban /summarize</small>
               </div>
               <button className="btn-primary" onClick={onRunCommand}>
-                Run Command
+                Run
               </button>
             </div>
             <pre className="code-box">{commandOutput || 'No command executed yet.'}</pre>
           </div>
         </Card>
 
-        <Card
-          title="Active Tasks Summary"
-          action={
-            <button className="btn-ghost" onClick={() => activeTasks[0] && onOpenTask(activeTasks[0])}>
-              Open Command Center
-            </button>
-          }
-        >
-          <div className="cards-2">
-            {activeTasks.length ? activeTasks.map((task) => <TaskCard key={task.id} task={task} onOpenTask={onOpenTask} />) : <p>No active tasks.</p>}
-          </div>
-        </Card>
-
-        <Card title="Recent Session Feed">
-          <div className="feed-list">
-            {recentSessions.length ? recentSessions.map((item) => <FeedRow key={item.title + item.subtitle} item={item} />) : <p>No recent sessions.</p>}
-          </div>
-        </Card>
-
         <div className="cards-2">
-          <Card title="Productivity Snapshot">
-            <div className="kpi-grid">
-              <MetricCard label="Commands Today" value={overview.productivity.commandsToday || 0} subtext="tracked tasks" />
-              <MetricCard label="Auto-Resolved" value={overview.productivity.autoResolved || 0} subtext="done status" />
-              <MetricCard label="Approvals Pending" value={overview.productivity.approvalsPending || 0} subtext="need attention" />
-              <MetricCard label="Avg Response" value={overview.productivity.avgResponse || '-'} subtext="rolling estimate" />
-              <MetricCard label="Blocked Tasks" value={overview.productivity.blockedTasks || 0} subtext="from task list" />
-              <MetricCard label="Artifacts Created" value={overview.productivity.artifactsCreated || 0} subtext="derived" />
+          <Card title="Active Tasks" action={<small>{activeTasks.length} running</small>}>
+            <div className="stack-gap">
+              {activeTasks.length ? activeTasks.map((task) => <TaskCard key={task.id} task={task} onOpenTask={onOpenTask} />) : <p>No active tasks.</p>}
             </div>
           </Card>
 
-          <Card title="Timeline / Attention Queue">
+          <Card title="Recent Commands" action={<small>6h window</small>}>
+            <div className="stack-gap">
+              {recentCommands.map((task) => (
+                <article key={task.id} className="task-card">
+                  <div className="row-between">
+                    <h4>{task.title}</h4>
+                    <StatusChip text={prettyLabel(task.status)} tone={task.status} />
+                  </div>
+                  <p>{task.description || 'No summary.'}</p>
+                  <small>{prettyLabel(task.agent)} | {formatSince(task.updatedAt || task.createdAt)}</small>
+                </article>
+              ))}
+            </div>
+          </Card>
+        </div>
+
+        <div className="cards-2">
+          <Card title="Productivity Snapshot" action={<small>Today</small>}>
+            <div className="kpi-grid">
+              <MetricCard label="Tasks Completed" value={overview.productivity.autoResolved || 0} subtext="done" />
+              <MetricCard label="Active Workspaces" value="5" subtext="workspace graph" />
+              <MetricCard label="Approvals Pending" value={overview.productivity.approvalsPending || 0} subtext="queue" />
+              <MetricCard label="Avg Completion" value={overview.productivity.avgResponse || '-'} subtext="rolling" />
+              <MetricCard label="Success Ratio" value="92%" subtext="pipeline quality" />
+              <MetricCard label="Agent Utilization" value="74%" subtext="capacity" />
+            </div>
+          </Card>
+
+          <Card title="Timeline / Attention Queue" action={<small>Live events</small>}>
             <div className="timeline">
               {overview.activity.slice(0, 6).map((item) => (
                 <div className="timeline-row" key={item.id}>
@@ -231,23 +587,19 @@ function DashboardScreen({ overview, onOpenTask, command, setCommand, onRunComma
       </div>
 
       <aside className="right-stack">
-        <Card title="Agent Status">
+        <Card title="Agent Status" action={<small>avg response</small>}>
           <div className="stack-gap">{overview.agents.map((agent) => <AgentRow key={agent.id} agent={agent} />)}</div>
         </Card>
-
-        <Card title="Approvals Queue">
+        <Card title="Approvals" action={<small>{overview.approvals.length} pending</small>}>
           <div className="stack-gap">
             {overview.approvals.length ? (
               overview.approvals.map((task) => (
                 <article className="approval-item" key={task.id}>
-                  <div>
-                    <h5>{task.title}</h5>
-                    <p>{task.description || 'Needs approval before proceeding.'}</p>
-                  </div>
-                  <div className="mini-actions">
-                    <button className="btn-success" onClick={() => onOpenTask(task)}>
-                      Review
-                    </button>
+                  <p>{task.title}</p>
+                  <div className="mini-actions wrap-actions">
+                    <button className="btn-success" onClick={() => onApproveTask(task)}>Approve</button>
+                    <button className="btn-danger" onClick={() => onRejectTask(task)}>Reject</button>
+                    <button className="btn-ghost" onClick={() => onRerunTask(task)}>Edit & rerun</button>
                   </div>
                 </article>
               ))
@@ -256,45 +608,52 @@ function DashboardScreen({ overview, onOpenTask, command, setCommand, onRunComma
             )}
           </div>
         </Card>
-
-        <Card title="Notifications">
-          <ul className="list-plain">
-            <li>Gateway {overview.gateway.connected ? 'connected' : 'disconnected'}</li>
-            <li>{overview.sessions.length} recent sessions available</li>
-            <li>{overview.logs.length} log lines loaded</li>
-          </ul>
+        <Card title="Notifications" action={<small>{overview.activity.length} unread</small>}>
+          <div className="stack-gap">
+            <p>{overview.logs[0] || 'No alert.'}</p>
+            <button className="btn-ghost" onClick={onJumpToLive}>Open Activity Logs</button>
+          </div>
+        </Card>
+        <Card title="Shortcuts">
+          <div className="shortcut-grid">
+            <button className="btn-ghost" onClick={onNewCommand}>New Command</button>
+            <button className="btn-ghost" onClick={onOpenArtifacts}>Artifacts</button>
+            <button className="btn-ghost" onClick={onOpenKanban}>Open Kanban</button>
+          </div>
         </Card>
       </aside>
     </div>
   )
 }
 
-function CommandCenterScreen({ selectedTask, overview, onTaskPatch }) {
-  if (!selectedTask) {
+function CommandCenterScreen({ selectedTask, overview, onTaskPatch, onOpenTask }) {
+  const fallbackTask = selectedTask || overview.tasks[0] || null
+
+  if (!fallbackTask) {
     return (
       <div className="content-grid">
         <div className="main-stack">
           <Card title="Task Context">
-            <p>Select a task from Dashboard or Kanban.</p>
+            <p>No task available yet. Create one from Kanban or Quick Command flow.</p>
           </Card>
         </div>
       </div>
     )
   }
 
-  const relatedSession = overview.sessions.find((session) => session.sessionKey === selectedTask.sessionKey)
+  const relatedSession = overview.sessions.find((session) => session.sessionKey === fallbackTask.sessionKey)
 
   return (
     <div className="content-grid">
       <div className="main-stack">
         <Card title="Task Context">
           <div className="text-block">
-            <h2>{selectedTask.title}</h2>
-            <p>{selectedTask.description || 'No description provided.'}</p>
+            <h2>{fallbackTask.title}</h2>
+            <p>{fallbackTask.description || 'No description provided.'}</p>
             <div className="chip-wrap">
-              <StatusChip text={selectedTask.agent} tone={selectedTask.agent} />
-              <StatusChip text={selectedTask.priority} tone={selectedTask.priority} />
-              <StatusChip text={selectedTask.status} tone={selectedTask.status} />
+              <StatusChip text={fallbackTask.agent} tone={fallbackTask.agent} />
+              <StatusChip text={fallbackTask.priority} tone={fallbackTask.priority} />
+              <StatusChip text={fallbackTask.status} tone={fallbackTask.status} />
             </div>
           </div>
         </Card>
@@ -305,29 +664,45 @@ function CommandCenterScreen({ selectedTask, overview, onTaskPatch }) {
 
         <Card title="Execution Controls">
           <div className="mini-actions wrap-actions">
-            <button className="btn-success" onClick={() => onTaskPatch(selectedTask.id, { status: 'done', progress: 100 })}>
+            <button className="btn-success" onClick={() => onTaskPatch(fallbackTask.id, { status: 'done', progress: 100 })}>
               Mark Done
             </button>
             <button
               className="btn-ghost"
-              onClick={() => onTaskPatch(selectedTask.id, { status: 'in-progress', progress: Math.min(100, Number(selectedTask.progress || 0) + 10) })}
+              onClick={() => onTaskPatch(fallbackTask.id, { status: 'in-progress', progress: Math.min(100, Number(fallbackTask.progress || 0) + 10) })}
             >
               Advance Progress
             </button>
-            <button className="btn-danger" onClick={() => onTaskPatch(selectedTask.id, { status: 'blocked' })}>
+            <button className="btn-danger" onClick={() => onTaskPatch(fallbackTask.id, { status: 'blocked' })}>
               Block
             </button>
+          </div>
+        </Card>
+
+        <Card title="Task Queue">
+          <div className="feed-list">
+            {overview.tasks.slice(0, 8).map((task) => (
+              <FeedRow
+                key={task.id}
+                item={{
+                  title: task.title,
+                  subtitle: `${prettyLabel(task.agent)} · ${prettyLabel(task.priority)}`,
+                  state: task.status,
+                }}
+                onAction={() => onOpenTask(task)}
+              />
+            ))}
           </div>
         </Card>
       </div>
 
       <aside className="right-stack">
         <Card title="Approvals">
-          <p>{selectedTask.approvalRequired ? 'Approval is required.' : 'No approval needed.'}</p>
+          <p>{fallbackTask.approvalRequired ? 'Approval is required.' : 'No approval needed.'}</p>
         </Card>
         <Card title="Files">
           <ul className="list-plain">
-            <li>{selectedTask.sessionKey || 'No linked artifact'}</li>
+            <li>{fallbackTask.sessionKey || 'No linked artifact'}</li>
           </ul>
         </Card>
       </aside>
@@ -335,35 +710,94 @@ function CommandCenterScreen({ selectedTask, overview, onTaskPatch }) {
   )
 }
 
-function KanbanScreen({ tasks, onOpenTask, onTaskPatch, onCreateTask }) {
+function KanbanScreen({ tasks, onOpenTask, onTaskPatch, onCreateTask, onGenerateTasks }) {
   const columns = KANBAN_COLUMNS
+  const workspaceOptions = ['all', ...WORKSPACE_PRESETS]
   const [search, setSearch] = useState('')
   const [newTitle, setNewTitle] = useState('')
   const [newDescription, setNewDescription] = useState('')
+  const [workspaceFilter, setWorkspaceFilter] = useState('all')
+  const [activeOnly, setActiveOnly] = useState(false)
+  const [generating, setGenerating] = useState(false)
 
   const filtered = useMemo(() => {
     const q = search.trim().toLowerCase()
-    if (!q) return tasks
-    return tasks.filter((task) => [task.title, task.description, task.agent, task.status].join(' ').toLowerCase().includes(q))
-  }, [tasks, search])
+    return tasks.filter((task) => {
+      const taskWorkspace = task.workspace || WORKSPACE_PRESETS[0]
+      if (workspaceFilter !== 'all' && taskWorkspace !== workspaceFilter) return false
+      if (activeOnly && task.status === 'done') return false
+      if (!q) return true
+      return [task.title, task.description, task.agent, task.status, taskWorkspace].join(' ').toLowerCase().includes(q)
+    })
+  }, [tasks, search, workspaceFilter, activeOnly])
 
-  const grouped = Object.fromEntries(columns.map((key) => [key, filtered.filter((task) => task.status === key)]))
+  const grouped = Object.fromEntries(
+    columns.map((key) => [
+      key,
+      filtered.filter((task) => {
+        if (key === 'todo') return task.status === 'todo' || task.status === 'assigned'
+        return task.status === key
+      }),
+    ]),
+  )
+
+  function quickMove(taskId, column) {
+    const patch = { status: column }
+    if (column === 'done') {
+      patch.progress = 100
+      patch.approvalRequired = false
+    }
+    if (column === 'waiting-review') {
+      patch.approvalRequired = true
+    }
+    onTaskPatch(taskId, patch)
+  }
+
+  async function handleGenerate() {
+    setGenerating(true)
+    try {
+      await onGenerateTasks(workspaceFilter === 'all' ? WORKSPACE_PRESETS[0] : workspaceFilter)
+    } finally {
+      setGenerating(false)
+    }
+  }
+
+  function addCardToColumn(column) {
+    const workspace = workspaceFilter === 'all' ? WORKSPACE_PRESETS[0] : workspaceFilter
+    const status = column === 'todo' ? 'todo' : column
+    const options = {
+      status,
+      workspace,
+      approvalRequired: column === 'waiting-review',
+      progress: column === 'done' ? 100 : 0,
+    }
+    onCreateTask(`New ${kanbanColumnLabel(column)} Task`, 'Created from Kanban quick add.', options)
+  }
 
   return (
     <div className="kanban-page">
       <header className="kanban-head">
         <div>
-          <h2>Kanban Board</h2>
-          <p>Live task board from backend API</p>
+          <h2>Kanban Work Layer</h2>
+          <p>Turn AI outputs into prioritized operational execution</p>
         </div>
         <div className="mini-actions wrap-actions">
-          <input className="search-input compact-input" placeholder="Filter tasks..." value={search} onChange={(event) => setSearch(event.target.value)} />
+          <button className="btn-ghost" onClick={() => setWorkspaceFilter(nextInList(workspaceOptions, workspaceFilter))}>
+            Workspace: {workspaceFilter === 'all' ? 'All' : workspaceFilter}
+          </button>
+          <input className="search-input compact-input" placeholder="Search" value={search} onChange={(event) => setSearch(event.target.value)} />
+          <button className={activeOnly ? 'btn-primary' : 'btn-ghost'} onClick={() => setActiveOnly((current) => !current)}>
+            Filter: {activeOnly ? 'Active' : 'All'}
+          </button>
+          <button className="btn-success" onClick={handleGenerate} disabled={generating}>
+            {generating ? 'Generating...' : 'AI Generate'}
+          </button>
           <input className="search-input compact-input" placeholder="New task title" value={newTitle} onChange={(event) => setNewTitle(event.target.value)} />
           <input className="search-input compact-input" placeholder="Description" value={newDescription} onChange={(event) => setNewDescription(event.target.value)} />
           <button
             className="btn-primary"
             onClick={() => {
-              onCreateTask(newTitle, newDescription)
+              onCreateTask(newTitle, newDescription, { workspace: workspaceFilter === 'all' ? WORKSPACE_PRESETS[0] : workspaceFilter })
               setNewTitle('')
               setNewDescription('')
             }}
@@ -375,9 +809,9 @@ function KanbanScreen({ tasks, onOpenTask, onTaskPatch, onCreateTask }) {
 
       <div className="kanban-board">
         {columns.map((column) => (
-          <section key={column} className="kanban-column">
+          <section key={column} className={`kanban-column kanban-${column}`}>
             <header className="row-between">
-              <h4>{prettyLabel(column)}</h4>
+              <h4>{kanbanColumnLabel(column)}</h4>
               <small>{grouped[column].length}</small>
             </header>
 
@@ -386,6 +820,7 @@ function KanbanScreen({ tasks, onOpenTask, onTaskPatch, onCreateTask }) {
                 <article key={task.id} className="kanban-card">
                   <h5>{task.title}</h5>
                   <p>{task.description || 'No description'}</p>
+                  <small>{task.workspace || WORKSPACE_PRESETS[0]}</small>
                   <div className="chip-wrap">
                     <StatusChip text={task.agent} tone={task.agent} />
                     <StatusChip text={task.priority} tone={task.priority} />
@@ -394,24 +829,20 @@ function KanbanScreen({ tasks, onOpenTask, onTaskPatch, onCreateTask }) {
                     <button className="btn-ghost" onClick={() => onOpenTask(task)}>
                       Open
                     </button>
-                    {column !== 'done' && (
-                      <button className="btn-success" onClick={() => onTaskPatch(task.id, { status: 'done', progress: 100 })}>
-                        Done
-                      </button>
-                    )}
-                    {column === 'inbox' && (
-                      <button className="btn-ghost" onClick={() => onTaskPatch(task.id, { status: 'assigned', progress: 20 })}>
-                        Assign
-                      </button>
-                    )}
-                    {column === 'assigned' && (
-                      <button className="btn-ghost" onClick={() => onTaskPatch(task.id, { status: 'in-progress', progress: 55 })}>
-                        Start
-                      </button>
-                    )}
+                    {column !== 'done' && <button className="btn-success" onClick={() => quickMove(task.id, 'done')}>Done</button>}
+                    {column === 'inbox' && <button className="btn-ghost" onClick={() => quickMove(task.id, 'todo')}>To Do</button>}
+                    {column === 'todo' && <button className="btn-ghost" onClick={() => quickMove(task.id, 'in-progress')}>Start</button>}
+                    {column === 'in-progress' && <button className="btn-ghost" onClick={() => quickMove(task.id, 'waiting-review')}>Review</button>}
+                    {column === 'waiting-review' && <button className="btn-ghost" onClick={() => quickMove(task.id, 'done')}>Approve</button>}
                   </div>
                 </article>
               ))}
+              <button
+                className="btn-ghost full-width"
+                onClick={() => addCardToColumn(column)}
+              >
+                + Add card
+              </button>
             </div>
           </section>
         ))}
@@ -550,6 +981,55 @@ function ActivityLogsScreen({ overview }) {
   )
 }
 
+function ReportsScreen({ overview }) {
+  const doneReports = overview.reports || []
+
+  return (
+    <div className="content-grid">
+      <div className="main-stack">
+        <Card title="Reports / Zeta Recap" action={<small>{doneReports.length} done summaries</small>}>
+          <div className="stack-gap">
+            {doneReports.length ? (
+              doneReports.map((report) => (
+                <article className="report-card" key={report.taskId}>
+                  <div className="row-between">
+                    <h4>{report.title}</h4>
+                    <StatusChip text="done" tone="success" />
+                  </div>
+                  <small>
+                    {report.completedDate} {report.completedTime} ({report.completedAt ? formatLocalDateTime(report.completedAt) : '-'})
+                  </small>
+                  <p><strong>Task:</strong> {report.taskId}</p>
+                  <p><strong>Terlibat:</strong> {(report.participants || []).join(', ') || '-'}</p>
+                  <p><strong>Model:</strong> {(report.models || []).join(', ') || '-'}</p>
+                  <p><strong>Apa dikerjakan:</strong> {report.workDone}</p>
+                  <p><strong>Output:</strong> {report.output}</p>
+                  <p><strong>Kesimpulan:</strong> {report.conclusion}</p>
+                  <p><strong>Saran perbaikan:</strong> {report.improvementSuggestions}</p>
+                  <p><strong>Pro:</strong> {(report.pros || []).join(' | ') || '-'}</p>
+                  <p><strong>Kontra:</strong> {(report.cons || []).join(' | ') || '-'}</p>
+                </article>
+              ))
+            ) : (
+              <p>Belum ada task done yang masuk report.</p>
+            )}
+          </div>
+        </Card>
+      </div>
+
+      <aside className="right-stack">
+        <Card title="Report Rules">
+          <ul className="list-plain">
+            <li>Status done otomatis membuat recap Zeta.</li>
+            <li>Report tersimpan di SQL (`reports.sqlite`).</li>
+            <li>`memory.md` selalu sinkron dengan semua done task.</li>
+          </ul>
+        </Card>
+      </aside>
+    </div>
+  )
+}
+
 function SettingsScreen({ settings, onSave }) {
   const [draft, setDraft] = useState(settings)
   const [savedAt, setSavedAt] = useState('')
@@ -603,7 +1083,6 @@ function SettingsScreen({ settings, onSave }) {
 
 function AppShell() {
   const navigate = useNavigate()
-  const location = useLocation()
 
   const [overview, setOverview] = useState({
     appName: 'OpenClaw Command Center',
@@ -613,6 +1092,8 @@ function AppShell() {
     tasks: [],
     approvals: [],
     activity: [],
+    reports: [],
+    reportSummary: { doneTasks: 0, lastReportAt: null },
     productivity: {},
     system: { memory: {}, disk: {}, uptime: 0 },
     logs: [],
@@ -622,7 +1103,10 @@ function AppShell() {
 
   const [settings, setSettings] = useState({})
   const [selectedTask, setSelectedTask] = useState(null)
+  const [selectedFlowNode, setSelectedFlowNode] = useState('main')
   const [command, setCommand] = useState('openclaw status')
+  const [commandMode, setCommandMode] = useState('auto')
+  const [topSearch, setTopSearch] = useState('')
   const [commandOutput, setCommandOutput] = useState('No command executed yet.')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
@@ -680,12 +1164,21 @@ function AppShell() {
     await loadOverview()
   }
 
-  async function createTask(title, description) {
+  async function createTask(title, description, options = {}) {
     if (!title.trim()) return
     await fetch('/api/tasks', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title, description, agent: 'main', priority: 'normal' }),
+      body: JSON.stringify({
+        title,
+        description,
+        agent: options.agent || 'main',
+        priority: options.priority || 'normal',
+        status: options.status || 'inbox',
+        approvalRequired: Boolean(options.approvalRequired),
+        workspace: options.workspace || overview.workspace || WORKSPACE_PRESETS[0],
+        progress: typeof options.progress === 'number' ? options.progress : 0,
+      }),
     })
     await loadOverview()
   }
@@ -700,14 +1193,23 @@ function AppShell() {
     setSettings(data)
   }
 
-  async function runCommand() {
+  async function runCommand(commandOverride) {
+    const baseCommand = String(commandOverride || command).trim()
+    if (!baseCommand) return
+
+    let effectiveCommand = baseCommand
+    if (commandMode !== 'auto' && effectiveCommand.startsWith('openclaw ') && !effectiveCommand.includes('--agent')) {
+      effectiveCommand = `${effectiveCommand} --agent ${commandMode}`
+    }
+
+    if (commandOverride) setCommand(baseCommand)
     const response = await fetch('/api/command', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ command }),
+      body: JSON.stringify({ command: effectiveCommand }),
     })
     const data = await response.json()
-    setCommandOutput([`$ ${data.command || command}`, data.stdout || '', data.stderr || '', data.error || ''].filter(Boolean).join('\n'))
+    setCommandOutput([`$ ${data.command || effectiveCommand}`, data.stdout || '', data.stderr || '', data.error || ''].filter(Boolean).join('\n'))
   }
 
   function openTask(task) {
@@ -715,9 +1217,134 @@ function AppShell() {
     navigate('/command-center')
   }
 
+  async function cycleWorkspacePreset() {
+    const currentWorkspace = settings.defaultWorkspace || overview.workspace || WORKSPACE_PRESETS[0]
+    const nextWorkspace = nextInList(WORKSPACE_PRESETS, currentWorkspace)
+    await saveSettings({ defaultWorkspace: nextWorkspace })
+    await loadOverview()
+  }
+
+  function cycleCommandMode() {
+    setCommandMode((current) => nextInList(COMMAND_MODES, current))
+  }
+
+  function attachCommand() {
+    setCommand((current) => (current.includes('--attach ') ? current : `${current} --attach ./artifacts/context.md`))
+  }
+
+  function prepareNewCommand() {
+    setCommand('openclaw status --json')
+    navigate('/dashboard')
+  }
+
+  function jumpToLive() {
+    navigate('/activity-logs')
+  }
+
+  function openArtifacts() {
+    navigate('/artifacts')
+  }
+
+  function openKanban() {
+    navigate('/kanban')
+  }
+
+  async function approveTask(task) {
+    await patchTask(task.id, { status: 'done', progress: 100, approvalRequired: false })
+    setCommandOutput(`Approved: ${task.title}`)
+  }
+
+  async function rejectTask(task) {
+    await patchTask(task.id, { status: 'blocked', approvalRequired: false })
+    setCommandOutput(`Rejected: ${task.title} moved to blocked`)
+  }
+
+  async function rerunTask(task) {
+    await patchTask(task.id, {
+      status: 'in-progress',
+      approvalRequired: false,
+      progress: Math.min(95, Math.max(20, Number(task.progress || 0))),
+    })
+    setSelectedTask(task)
+    navigate('/command-center')
+  }
+
+  async function resolveCoordinationLock() {
+    const lockedTask = overview.tasks.find((task) => task.status === 'blocked' || task.status === 'waiting-review')
+    if (!lockedTask) {
+      setCommandOutput('No lock detected. Nothing to resolve.')
+      return
+    }
+    await patchTask(lockedTask.id, {
+      status: 'in-progress',
+      approvalRequired: false,
+      progress: Math.max(30, Number(lockedTask.progress || 0)),
+    })
+    setCommandOutput(`Resolved lock on task: ${lockedTask.title}`)
+  }
+
+  function viewEdgePayload(edge, edgeInfo) {
+    setCommandOutput(
+      [`Edge: ${edge.id}`, `From: ${edge.from}`, `To: ${edge.to}`, `Reason: ${edgeInfo.reason}`, JSON.stringify(edgeInfo.payload, null, 2)].join('\n'),
+    )
+  }
+
+  async function replayEdge(edge, edgeInfo) {
+    await runCommand(`echo replay ${edge.id} ${edgeInfo.reason}`)
+  }
+
+  async function retryLoop() {
+    const blockedTask = overview.tasks.find((task) => task.status === 'blocked')
+    if (!blockedTask) {
+      setCommandOutput('No blocked task found for retry.')
+      return
+    }
+    await patchTask(blockedTask.id, {
+      status: 'in-progress',
+      progress: Math.max(35, Number(blockedTask.progress || 0)),
+      approvalRequired: false,
+    })
+    setCommandOutput(`Retry started: ${blockedTask.title}`)
+  }
+
+  function openTraceback() {
+    navigate('/activity-logs')
+  }
+
+  async function runOc219() {
+    await runCommand('openclaw status --json')
+  }
+
+  async function generateTasks(workspaceName) {
+    const response = await fetch('/api/tasks/generate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspace: workspaceName }),
+    })
+    const data = await response.json()
+    await loadOverview()
+    const createdCount = Array.isArray(data.items) ? data.items.length : 0
+    setCommandOutput(`AI Generate created ${createdCount} tasks for workspace ${workspaceName}.`)
+  }
+
+  function handleTopSearchKeyDown(event) {
+    if (event.key !== 'Enter') return
+    const query = topSearch.trim().toLowerCase()
+    if (!query) return
+    const match = overview.tasks.find((task) => [task.title, task.description, task.agent, task.status].join(' ').toLowerCase().includes(query))
+    if (match) {
+      openTask(match)
+      return
+    }
+    navigate('/dashboard')
+    setCommandOutput(`No task matched "${topSearch}".`)
+  }
+
   const navWithBadges = sideNav.map((item) => {
+    if (item.label === 'Coordination') return { ...item, badge: String(overview.approvals.length || '') }
     if (item.label === 'Command Center') return { ...item, badge: selectedTask ? '1' : '' }
     if (item.label === 'Kanban') return { ...item, badge: String(overview.tasks.length || '') }
+    if (item.label === 'Reports') return { ...item, badge: String(overview.reportSummary?.doneTasks || overview.reports.length || '') }
     if (item.label === 'Activity Logs') return { ...item, badge: String(overview.activity.length || '') }
     return { ...item, badge: '' }
   })
@@ -727,14 +1354,37 @@ function AppShell() {
       <div className="app-shell">
         <header className="top-nav">
           <div className="top-left">
-            <strong>{overview.appName}</strong>
-            <button className="btn-ghost">Workspace: {overview.workspace}</button>
-            <StatusChip text={streamConnected ? 'Live Sync' : 'Polling Mode'} tone={streamConnected ? 'success' : 'warning'} />
-            <StatusChip text={overview.gateway.connected ? 'Gateway Connected' : 'Gateway Offline'} tone={overview.gateway.connected ? 'success' : 'error'} />
+            <div className="brand-box">
+              <div className="brand-icon" />
+              <div>
+                <strong>{overview.appName}</strong>
+                <small>WORKSPACE // {overview.workspace}</small>
+              </div>
+            </div>
+            <button className="btn-ghost" onClick={cycleWorkspacePreset}>
+              {settings.defaultWorkspace || overview.workspace}
+            </button>
           </div>
 
           <div className="top-actions">
-            <input className="search-input" value={location.pathname} readOnly />
+            <input
+              className="search-input"
+              value={topSearch}
+              placeholder="Search tasks, artifacts, commands"
+              onChange={(event) => setTopSearch(event.target.value)}
+              onKeyDown={handleTopSearchKeyDown}
+            />
+            <button className="btn-primary" onClick={prepareNewCommand}>+ New Command</button>
+            <button className="btn-ghost" onClick={() => navigate('/dashboard')}>
+              {overview.approvals.length}
+            </button>
+            <button className="btn-ghost" onClick={() => navigate('/kanban')}>
+              {overview.tasks.length}
+            </button>
+            <button className="btn-ghost" onClick={loadOverview}>{streamConnected ? 'Live' : 'Sync'}</button>
+            <button className="btn-ghost" onClick={() => navigate('/workspaces')}>
+              {overview.gateway.connected ? 'Nadya' : 'Offline'}
+            </button>
             <button className="btn-primary" onClick={loadOverview}>
               Refresh
             </button>
@@ -743,12 +1393,26 @@ function AppShell() {
 
         <div className="app-body">
           <aside className="side-nav">
+            <div className="workspace-box">
+              <small>ACTIVE WORKSPACE</small>
+              <p>{overview.workspace}</p>
+            </div>
             {navWithBadges.map((item) => (
               <NavLink key={item.to} to={item.to} className={({ isActive }) => `side-link ${isActive ? 'active' : ''}`}>
                 <span>{item.label}</span>
                 {item.badge && <small className="nav-badge">{item.badge}</small>}
               </NavLink>
             ))}
+            <div className="system-health">
+              <small>SYSTEM HEALTH</small>
+              <div className="row-between">
+                <strong>Agent fabric</strong>
+                <strong className="ok">{(100 - Number(overview.system?.cpu?.usage || 0) / 2).toFixed(1)}%</strong>
+              </div>
+              <div className="health-track">
+                <div className="health-fill" style={{ width: `${Math.max(6, Math.min(100, 100 - Number(overview.system?.cpu?.usage || 0) / 2))}%` }} />
+              </div>
+            </div>
           </aside>
 
           <main className="page-main">
@@ -759,6 +1423,30 @@ function AppShell() {
             ) : (
               <Routes>
                 <Route
+                  path="/coordination"
+                  element={
+                    <CoordinationScreen
+                      overview={overview}
+                      onOpenTask={openTask}
+                      command={command}
+                      setCommand={setCommand}
+                      onRunCommand={runCommand}
+                      commandOutput={commandOutput}
+                      selectedFlowNode={selectedFlowNode}
+                      setSelectedFlowNode={setSelectedFlowNode}
+                      onResolveLock={resolveCoordinationLock}
+                      onRunOc219={runOc219}
+                      onJumpToLive={jumpToLive}
+                      onApproveTask={approveTask}
+                      onRejectTask={rejectTask}
+                      onViewEdgePayload={viewEdgePayload}
+                      onReplayEdge={replayEdge}
+                      onOpenTraceback={openTraceback}
+                      onRetryLoop={retryLoop}
+                    />
+                  }
+                />
+                <Route
                   path="/dashboard"
                   element={
                     <DashboardScreen
@@ -768,16 +1456,38 @@ function AppShell() {
                       setCommand={setCommand}
                       onRunCommand={runCommand}
                       commandOutput={commandOutput}
+                      commandMode={commandMode}
+                      onCycleCommandMode={cycleCommandMode}
+                      onAttachCommand={attachCommand}
+                      onApproveTask={approveTask}
+                      onRejectTask={rejectTask}
+                      onRerunTask={rerunTask}
+                      onNewCommand={prepareNewCommand}
+                      onOpenArtifacts={openArtifacts}
+                      onOpenKanban={openKanban}
+                      onJumpToLive={jumpToLive}
                     />
                   }
                 />
                 <Route
                   path="/command-center"
-                  element={<CommandCenterScreen selectedTask={selectedTask} overview={overview} onTaskPatch={patchTask} />}
+                  element={<CommandCenterScreen selectedTask={selectedTask} overview={overview} onTaskPatch={patchTask} onOpenTask={openTask} />}
                 />
-                <Route path="/kanban" element={<KanbanScreen tasks={overview.tasks} onOpenTask={openTask} onTaskPatch={patchTask} onCreateTask={createTask} />} />
+                <Route
+                  path="/kanban"
+                  element={
+                    <KanbanScreen
+                      tasks={overview.tasks}
+                      onOpenTask={openTask}
+                      onTaskPatch={patchTask}
+                      onCreateTask={createTask}
+                      onGenerateTasks={generateTasks}
+                    />
+                  }
+                />
                 <Route path="/artifacts" element={<ArtifactsScreen overview={overview} />} />
                 <Route path="/workspaces" element={<WorkspacesScreen overview={overview} />} />
+                <Route path="/reports" element={<ReportsScreen overview={overview} />} />
                 <Route path="/activity-logs" element={<ActivityLogsScreen overview={overview} />} />
                 <Route path="/settings" element={<SettingsScreen settings={settings} onSave={saveSettings} />} />
                 <Route path="/" element={<Navigate to="/dashboard" replace />} />
