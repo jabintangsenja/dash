@@ -1,6 +1,13 @@
-# OpenClaw UI (gpt5.4-inv)
+﻿# OpenClaw Command Center (UI + API)
 
-Production-ready frontend for the OpenClaw Command Center screens:
+This project now runs as a single deployable service:
+
+- React dashboard frontend (7 screens)
+- Express backend API
+- Live updates via SSE (`/api/stream`)
+- OpenClaw integration with gateway/session/log discovery
+
+## Screens
 
 - Dashboard
 - Command Center
@@ -10,57 +17,54 @@ Production-ready frontend for the OpenClaw Command Center screens:
 - Activity Logs
 - Settings
 
-## Local Run
+## Local Development
 
 ```bash
 npm install
 npm run dev
 ```
 
-Open `http://localhost:5173`.
+Frontend dev URL: `http://localhost:5173`
 
-## Production Build
+## Production (Single Service)
 
 ```bash
 npm install
 npm run build
-npm run preview
+npm start
 ```
 
-## Deploy To VPS With Docker
+Service URL: `http://localhost:7070`
 
-1. Install Docker + Compose plugin on VPS.
-2. Clone this repo.
-3. Run:
+## Docker Deploy (VPS)
 
 ```bash
 docker compose up -d --build
 ```
 
-App will be available at `http://<VPS-IP>:8080`.
+Service URL: `http://<VPS-IP>:7070`
 
-## Nginx Reverse Proxy + Domain
+## Required Runtime Paths on VPS
 
-If you already use host-level Nginx, proxy your domain to `127.0.0.1:8080`.
+The compose file mounts these host paths into the container:
 
-Example:
+- `/root/.openclaw` -> read OpenClaw workspace/status
+- `/tmp/openclaw` -> read runtime logs
+- `./data` -> persist app tasks/settings
 
-```nginx
-server {
-  listen 80;
-  server_name your-domain.com;
+## API Endpoints
 
-  location / {
-    proxy_pass http://127.0.0.1:8080;
-    proxy_set_header Host $host;
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_set_header X-Forwarded-Proto $scheme;
-  }
-}
-```
+- `GET /api/health`
+- `GET /api/overview`
+- `GET /api/stream` (SSE)
+- `GET /api/tasks`
+- `POST /api/tasks`
+- `PATCH /api/tasks/:id`
+- `GET /api/settings`
+- `PATCH /api/settings`
+- `POST /api/command`
 
-Then issue TLS cert:
+## Notes
 
-```bash
-sudo certbot --nginx -d your-domain.com
-```
+- Gateway status path is auto-discovered if `OPENCLAW_STATUS_PATH` is not set.
+- Command runner is intentionally restricted to a safe command allowlist.

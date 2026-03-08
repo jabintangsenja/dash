@@ -78,6 +78,10 @@
   padding: 10px 12px;
 }
 
+.compact-input {
+  width: 220px;
+}
+
 .app-body {
   flex: 1;
   display: flex;
@@ -214,6 +218,10 @@ small {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+
+.wrap-actions {
+  flex-wrap: wrap;
 }
 
 .row-between {
@@ -535,6 +543,20 @@ small {
   padding: 8px 10px;
   font-family: 'JetBrains Mono', monospace;
   font-size: 12px;
+}
+
+.select-input {
+  border-radius: 10px;
+  border: 1px solid var(--border-soft);
+  background: rgba(4, 12, 24, 0.8);
+  color: var(--text-primary);
+  padding: 7px 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+}
+
+.top-gap {
+  margin-top: 12px;
 }
 
 @media (max-width: 1220px) {

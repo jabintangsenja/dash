@@ -1,0 +1,14 @@
+{
+  "organizationName": "OpenClaw Labs",
+  "defaultWorkspace": "OpenClaw Ops",
+  "region": "Asia/Jakarta",
+  "timeFormat": "24-hour",
+  "criticalAlerts": "Email + In-app",
+  "approvalReminders": "Every 10 minutes",
+  "digestSummary": "Daily at 18:00",
+  "incidentChannel": "#ops-alerts",
+  "primaryModel": "gpt5.4-inv",
+  "fallbackModel": "gpt5.3-fast",
+  "maxAutoRuns": "4",
+  "budgetGuardrail": "$120/day"
+}

@@ -6,12 +6,18 @@ RUN npm ci
 
 COPY . .
 RUN npm run build
+RUN npm prune --omit=dev
 
-FROM nginx:1.29-alpine
-WORKDIR /usr/share/nginx/html
+FROM node:22-alpine
+WORKDIR /app
+ENV NODE_ENV=production
+ENV PORT=7070
 
-COPY --from=build /app/dist ./
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY --from=build /app/package*.json ./
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY --from=build /app/server.js ./server.js
+COPY --from=build /app/data ./data
 
-EXPOSE 80
-CMD ["nginx", "-g", "daemon off;"]
+EXPOSE 7070
+CMD ["npm", "start"]

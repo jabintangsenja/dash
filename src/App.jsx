@@ -1,226 +1,227 @@
-﻿import { NavLink, Navigate, Route, Routes } from 'react-router-dom'
+﻿import { useCallback, useEffect, useMemo, useState } from 'react'
+import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import './App.css'
 
 const sideNav = [
-  { to: '/dashboard', label: 'Dashboard', badge: '' },
-  { to: '/command-center', label: 'Command Center', badge: '2' },
-  { to: '/kanban', label: 'Kanban', badge: '5' },
-  { to: '/artifacts', label: 'Artifacts', badge: '4' },
-  { to: '/workspaces', label: 'Workspaces', badge: '' },
-  { to: '/activity-logs', label: 'Activity Logs', badge: '19' },
-  { to: '/settings', label: 'Settings', badge: '' },
+  { to: '/dashboard', label: 'Dashboard' },
+  { to: '/command-center', label: 'Command Center' },
+  { to: '/kanban', label: 'Kanban' },
+  { to: '/artifacts', label: 'Artifacts' },
+  { to: '/workspaces', label: 'Workspaces' },
+  { to: '/activity-logs', label: 'Activity Logs' },
+  { to: '/settings', label: 'Settings' },
 ]
 
-const agentTone = {
+const KANBAN_COLUMNS = ['inbox', 'assigned', 'in-progress', 'blocked', 'done']
+
+const toneMap = {
+  main: 'zeta',
   zeta: 'zeta',
   coding: 'coding',
+  cyrus: 'coding',
   reasoning: 'reasoning',
+  rheon: 'reasoning',
   vision: 'vision',
+  vista: 'vision',
   warning: 'warning',
   success: 'success',
   error: 'error',
+  info: 'zeta',
+  active: 'success',
+  idle: 'warning',
+  busy: 'coding',
+  done: 'success',
+  'in-progress': 'coding',
+  assigned: 'vision',
+  inbox: 'zeta',
+  blocked: 'error',
+  rate_limited: 'warning',
 }
 
-function StatusChip({ text, tone = 'zeta' }) {
+function toneFor(value) {
+  return toneMap[String(value || '').toLowerCase()] || 'zeta'
+}
+
+function prettyLabel(value) {
+  return String(value || '')
+    .replace(/[-_]/g, ' ')
+    .replace(/\b\w/g, (char) => char.toUpperCase())
+}
+
+function formatSince(value) {
+  if (!value) return 'just now'
+  const diff = Math.max(0, Date.now() - new Date(value).getTime())
+  const mins = Math.round(diff / 60000)
+  if (mins < 1) return 'just now'
+  if (mins < 60) return `${mins}m ago`
+  const hours = Math.round(mins / 60)
+  if (hours < 24) return `${hours}h ago`
+  return `${Math.round(hours / 24)}d ago`
+}
+
+function StatusChip({ text, tone }) {
   return (
-    <span className={`status-chip ${tone}`}>
+    <span className={`status-chip ${toneFor(tone || text)}`}>
       <span className="chip-dot" />
       {text}
     </span>
   )
 }
 
-function TaskCard({ title, agents, status, step, progress, start, approval }) {
-  return (
-    <article className="task-card">
-      <div className="row-between">
-        <h4>{title}</h4>
-        <StatusChip text={status} tone={agentTone[status] ? status : 'zeta'} />
-      </div>
-      <div className="chip-wrap">
-        {agents.map((agent) => (
-          <StatusChip key={agent} text={agent} tone={agentTone[agent] ? agent : 'zeta'} />
-        ))}
-      </div>
-      <p className="muted">Step: {step}</p>
-      <div className="progress-track" aria-label="Task progress">
-        <div className="progress-fill" style={{ width: `${progress}%` }} />
-      </div>
-      <div className="row-between">
-        <small>Started {start}</small>
-        {approval && <StatusChip text="Approval Needed" tone="warning" />}
-      </div>
-      <div className="mini-actions">
-        <button className="btn-ghost">View</button>
-        <button className="btn-ghost">Pause</button>
-        <button className="btn-ghost">Details</button>
-      </div>
-    </article>
-  )
-}
-
-function AgentRow({ name, tone, state, currentTask, output, avg }) {
-  return (
-    <article className="agent-row">
-      <div>
-        <strong>{name}</strong>
-        <p>{currentTask}</p>
-      </div>
-      <div className="agent-meta">
-        <StatusChip text={state} tone={tone} />
-        <small>{output}</small>
-        <small>{avg}</small>
-      </div>
-    </article>
-  )
-}
-
-function ApprovalItem({ kind, reason }) {
-  return (
-    <article className="approval-item">
-      <div>
-        <h5>{kind}</h5>
-        <p>{reason}</p>
-      </div>
-      <div className="mini-actions">
-        <button className="btn-success">Approve</button>
-        <button className="btn-danger">Reject</button>
-        <button className="btn-ghost">Edit + Rerun</button>
-      </div>
-    </article>
-  )
-}
-
-function Card({ title, children, action }) {
+function Card({ title, action, children }) {
   return (
     <section className="panel-card">
       <header className="card-head">
         <h3>{title}</h3>
-        {action && <button className="btn-ghost">{action}</button>}
+        {action}
       </header>
       {children}
     </section>
   )
 }
 
-function DashboardScreen() {
+function MetricCard({ label, value, subtext }) {
+  return (
+    <div className="kpi">
+      <small>{label}</small>
+      <strong>{value}</strong>
+      <span>{subtext}</span>
+    </div>
+  )
+}
+
+function FeedRow({ item, actionLabel = 'Open', onAction }) {
+  return (
+    <article className="feed-row">
+      <div>
+        <h4>{item.title || item.detail}</h4>
+        <p>{item.subtitle || item.meta}</p>
+      </div>
+      <div className="feed-actions">
+        {item.state && <StatusChip text={item.state} tone={item.state} />}
+        {onAction && (
+          <button className="btn-ghost" onClick={onAction}>
+            {actionLabel}
+          </button>
+        )}
+      </div>
+    </article>
+  )
+}
+
+function AgentRow({ agent }) {
+  return (
+    <article className="agent-row">
+      <div>
+        <strong>{agent.name}</strong>
+        <p>{agent.currentTask}</p>
+      </div>
+      <div className="agent-meta">
+        <StatusChip text={agent.status} tone={agent.status} />
+        <small>{agent.model}</small>
+        <small>{agent.updatedAt ? formatSince(agent.updatedAt) : 'No active session'}</small>
+      </div>
+    </article>
+  )
+}
+
+function TaskCard({ task, onOpenTask }) {
+  return (
+    <article className="task-card">
+      <div className="row-between">
+        <h4>{task.title}</h4>
+        <StatusChip text={prettyLabel(task.status)} tone={task.status} />
+      </div>
+      <div className="chip-wrap">
+        <StatusChip text={task.agent} tone={task.agent} />
+        <StatusChip text={task.priority} tone={task.priority === 'high' ? 'warning' : task.priority} />
+        {task.approvalRequired && <StatusChip text="Approval Needed" tone="warning" />}
+      </div>
+      <p className="muted">{task.description || 'No description yet.'}</p>
+      <div className="progress-track" aria-label="Task progress">
+        <div className="progress-fill" style={{ width: `${task.progress || 0}%` }} />
+      </div>
+      <div className="row-between">
+        <small>Updated {formatSince(task.updatedAt || task.createdAt)}</small>
+        <small>{task.sessionKey || 'manual task'}</small>
+      </div>
+      <div className="mini-actions">
+        <button className="btn-ghost" onClick={() => onOpenTask(task)}>
+          Open
+        </button>
+      </div>
+    </article>
+  )
+}
+
+function DashboardScreen({ overview, onOpenTask, command, setCommand, onRunCommand, commandOutput }) {
+  const activeTasks = overview.tasks.filter((task) => task.status !== 'done').slice(0, 4)
+  const recentSessions = overview.sessions.slice(0, 6).map((session) => ({
+    title: session.title,
+    subtitle: `${prettyLabel(session.agent)} - ${session.model} - ${formatSince(session.updatedAt)}`,
+    state: session.status,
+  }))
+
   return (
     <div className="content-grid">
       <div className="main-stack">
-        <Card title="Quick Command" action="Templates">
+        <Card title="Quick Command" action={<small>Safe command runner</small>}>
           <div className="command-box">
-            <textarea
-              defaultValue="Build me a growth summary from this week, include anomalies, blocked tasks, and action recommendations."
-              aria-label="Quick command input"
-            />
+            <textarea value={command} onChange={(event) => setCommand(event.target.value)} aria-label="Quick command input" />
             <div className="row-between">
               <div className="row-inline">
-                <button className="btn-ghost">Attach</button>
-                <button className="btn-ghost">Mode: Deep Ops</button>
-                <small>/summarize /rerun /handoff /commit</small>
+                <button className="btn-ghost" disabled>
+                  Attach
+                </button>
+                <small>Allowed: openclaw, docker, git, node, npm, pwd, ls, cat, echo</small>
               </div>
-              <button className="btn-primary">Run Command</button>
+              <button className="btn-primary" onClick={onRunCommand}>
+                Run Command
+              </button>
             </div>
+            <pre className="code-box">{commandOutput || 'No command executed yet.'}</pre>
           </div>
         </Card>
 
-        <Card title="Active Tasks Summary" action="Open Command Center">
+        <Card
+          title="Active Tasks Summary"
+          action={
+            <button className="btn-ghost" onClick={() => activeTasks[0] && onOpenTask(activeTasks[0])}>
+              Open Command Center
+            </button>
+          }
+        >
           <div className="cards-2">
-            <TaskCard
-              title="Sync auth flow for launch candidate"
-              agents={['zeta', 'coding']}
-              status="success"
-              step="Testing rollback scenario"
-              progress={78}
-              start="09:12"
-              approval={false}
-            />
-            <TaskCard
-              title="Weekly executive digest and outlier detection"
-              agents={['reasoning', 'vision']}
-              status="warning"
-              step="Waiting for budget approval"
-              progress={63}
-              start="08:40"
-              approval
-            />
+            {activeTasks.length ? activeTasks.map((task) => <TaskCard key={task.id} task={task} onOpenTask={onOpenTask} />) : <p>No active tasks.</p>}
           </div>
         </Card>
 
-        <Card title="Recent Commands Feed" action="View All">
+        <Card title="Recent Session Feed">
           <div className="feed-list">
-            {[
-              {
-                cmd: 'Compare conversion before and after funnel patch',
-                who: 'zeta + reasoning',
-                ws: 'growth-lab',
-                when: '11m ago',
-                state: 'success',
-              },
-              {
-                cmd: 'Generate candidate landing hero variants',
-                who: 'vision',
-                ws: 'marketing-q2',
-                when: '26m ago',
-                state: 'warning',
-              },
-              {
-                cmd: 'Refactor retries in billing webhooks',
-                who: 'coding',
-                ws: 'payments-core',
-                when: '44m ago',
-                state: 'error',
-              },
-            ].map((item) => (
-              <article className="feed-row" key={item.cmd}>
-                <div>
-                  <h4>{item.cmd}</h4>
-                  <p>
-                    {item.who} • {item.ws} • {item.when}
-                  </p>
-                </div>
-                <div className="feed-actions">
-                  <StatusChip text={item.state} tone={item.state} />
-                  <button className="btn-ghost">Open</button>
-                  <button className="btn-ghost">Re-run</button>
-                </div>
-              </article>
-            ))}
+            {recentSessions.length ? recentSessions.map((item) => <FeedRow key={item.title + item.subtitle} item={item} />) : <p>No recent sessions.</p>}
           </div>
         </Card>
 
         <div className="cards-2">
           <Card title="Productivity Snapshot">
             <div className="kpi-grid">
-              {[
-                ['Commands Today', '42', '+13%'],
-                ['Auto-Resolved', '18', '+5'],
-                ['Approvals Pending', '3', '-2'],
-                ['Avg Response', '1.8s', '-0.2s'],
-                ['Blocked Tasks', '2', '+1'],
-                ['Artifacts Created', '27', '+7'],
-              ].map(([k, v, delta]) => (
-                <div className="kpi" key={k}>
-                  <small>{k}</small>
-                  <strong>{v}</strong>
-                  <span>{delta}</span>
-                </div>
-              ))}
+              <MetricCard label="Commands Today" value={overview.productivity.commandsToday || 0} subtext="tracked tasks" />
+              <MetricCard label="Auto-Resolved" value={overview.productivity.autoResolved || 0} subtext="done status" />
+              <MetricCard label="Approvals Pending" value={overview.productivity.approvalsPending || 0} subtext="need attention" />
+              <MetricCard label="Avg Response" value={overview.productivity.avgResponse || '-'} subtext="rolling estimate" />
+              <MetricCard label="Blocked Tasks" value={overview.productivity.blockedTasks || 0} subtext="from task list" />
+              <MetricCard label="Artifacts Created" value={overview.productivity.artifactsCreated || 0} subtext="derived" />
             </div>
           </Card>
+
           <Card title="Timeline / Attention Queue">
             <div className="timeline">
-              {[
-                ['09:32', 'Approval requested', 'Deploy staging migration'],
-                ['09:17', 'Blocked', 'Missing env key on worker cluster'],
-                ['08:58', 'Completed', 'Dashboard alert triage batch'],
-                ['08:44', 'Route', 'Assign bug replay analysis to Vision'],
-              ].map(([time, type, message]) => (
-                <div className="timeline-row" key={time + message}>
-                  <small>{time}</small>
+              {overview.activity.slice(0, 6).map((item) => (
+                <div className="timeline-row" key={item.id}>
+                  <small>{new Date(item.time).toLocaleTimeString()}</small>
                   <div>
-                    <strong>{type}</strong>
-                    <p>{message}</p>
+                    <StatusChip text={item.type} tone={item.type} />
+                    <p>{item.detail}</p>
                   </div>
                 </div>
               ))}
@@ -231,137 +232,102 @@ function DashboardScreen() {
 
       <aside className="right-stack">
         <Card title="Agent Status">
+          <div className="stack-gap">{overview.agents.map((agent) => <AgentRow key={agent.id} agent={agent} />)}</div>
+        </Card>
+
+        <Card title="Approvals Queue">
           <div className="stack-gap">
-            <AgentRow
-              name="Zeta"
-              tone="zeta"
-              state="Live"
-              currentTask="Orchestrating dashboard priorities"
-              output="Last output 2m ago"
-              avg="Avg 1.6s"
-            />
-            <AgentRow
-              name="Coding"
-              tone="coding"
-              state="Executing"
-              currentTask="Refactor queue handlers"
-              output="Last output 1m ago"
-              avg="Avg 1.9s"
-            />
-            <AgentRow
-              name="Reasoning"
-              tone="reasoning"
-              state="Reviewing"
-              currentTask="Budget anomaly analysis"
-              output="Last output 4m ago"
-              avg="Avg 2.7s"
-            />
-            <AgentRow
-              name="Vision"
-              tone="vision"
-              state="Ready"
-              currentTask="Awaiting media prompt"
-              output="Last output 7m ago"
-              avg="Avg 1.4s"
-            />
+            {overview.approvals.length ? (
+              overview.approvals.map((task) => (
+                <article className="approval-item" key={task.id}>
+                  <div>
+                    <h5>{task.title}</h5>
+                    <p>{task.description || 'Needs approval before proceeding.'}</p>
+                  </div>
+                  <div className="mini-actions">
+                    <button className="btn-success" onClick={() => onOpenTask(task)}>
+                      Review
+                    </button>
+                  </div>
+                </article>
+              ))
+            ) : (
+              <p>No approvals pending.</p>
+            )}
           </div>
         </Card>
-        <Card title="Approvals Queue" action="Open">
-          <div className="stack-gap">
-            <ApprovalItem kind="Deploy Request" reason="Prod hotfix requires elevated access." />
-            <ApprovalItem kind="Budget Exception" reason="Token usage burst exceeded workspace limit." />
-          </div>
-        </Card>
+
         <Card title="Notifications">
           <ul className="list-plain">
-            <li>2 failed runs in `payments-core`</li>
-            <li>New artifact pack in `marketing-q2`</li>
-            <li>3 teammates joined `growth-lab`</li>
+            <li>Gateway {overview.gateway.connected ? 'connected' : 'disconnected'}</li>
+            <li>{overview.sessions.length} recent sessions available</li>
+            <li>{overview.logs.length} log lines loaded</li>
           </ul>
-        </Card>
-        <Card title="Shortcuts">
-          <div className="shortcut-grid">
-            <button className="btn-ghost">New Command</button>
-            <button className="btn-ghost">Create Task</button>
-            <button className="btn-ghost">Open Artifacts</button>
-            <button className="btn-ghost">Route to Agent</button>
-          </div>
         </Card>
       </aside>
     </div>
   )
 }
 
-function CommandCenterScreen() {
+function CommandCenterScreen({ selectedTask, overview, onTaskPatch }) {
+  if (!selectedTask) {
+    return (
+      <div className="content-grid">
+        <div className="main-stack">
+          <Card title="Task Context">
+            <p>Select a task from Dashboard or Kanban.</p>
+          </Card>
+        </div>
+      </div>
+    )
+  }
+
+  const relatedSession = overview.sessions.find((session) => session.sessionKey === selectedTask.sessionKey)
+
   return (
     <div className="content-grid">
       <div className="main-stack">
         <Card title="Task Context">
           <div className="text-block">
-            <h2>Task #8842 • Optimize onboarding drop-off</h2>
-            <p>User request: explain causes of drop in completion rate and propose actions with confidence score.</p>
+            <h2>{selectedTask.title}</h2>
+            <p>{selectedTask.description || 'No description provided.'}</p>
             <div className="chip-wrap">
-              <StatusChip text="Workspace: growth-lab" tone="zeta" />
-              <StatusChip text="Priority: High" tone="warning" />
-              <StatusChip text="ETA: 19m" tone="success" />
+              <StatusChip text={selectedTask.agent} tone={selectedTask.agent} />
+              <StatusChip text={selectedTask.priority} tone={selectedTask.priority} />
+              <StatusChip text={selectedTask.status} tone={selectedTask.status} />
             </div>
           </div>
         </Card>
-        <Card title="User Prompt">
-          <pre className="code-box">
-Analyze event stream from last 14 days, compare cohorts, isolate breakpoints, and produce rollout recommendations with risk notes.
-          </pre>
+
+        <Card title="Linked Session">
+          <pre className="code-box">{relatedSession ? JSON.stringify(relatedSession, null, 2) : 'No linked session'}</pre>
         </Card>
-        <Card title="Execution Stream">
-          <div className="stack-gap">
-            <article className="log-row">
-              <StatusChip text="Zeta" tone="zeta" />
-              <p>Plan generated with 5 investigative branches and fallback route.</p>
-            </article>
-            <article className="log-row">
-              <StatusChip text="Coding" tone="coding" />
-              <p>Pipeline replay done on staging data, latency profile normalized.</p>
-            </article>
-            <article className="log-row">
-              <StatusChip text="Reasoning" tone="reasoning" />
-              <p>Primary correlation discovered between delayed email verification and drop-off.</p>
-            </article>
-            <article className="log-row">
-              <StatusChip text="Vision" tone="vision" />
-              <p>Generated annotated flow map of abandonment points.</p>
-            </article>
-          </div>
-        </Card>
-        <Card title="Final Synthesis">
-          <div className="text-block">
-            <p>
-              Completion drop is mainly tied to verification delay and mobile form friction. Expected uplift after fix:
-              8-11% completion.
-            </p>
-            <div className="mini-actions">
-              <button className="btn-primary">Apply Recommendations</button>
-              <button className="btn-ghost">Export Artifact</button>
-              <button className="btn-ghost">Rerun with Variant</button>
-            </div>
+
+        <Card title="Execution Controls">
+          <div className="mini-actions wrap-actions">
+            <button className="btn-success" onClick={() => onTaskPatch(selectedTask.id, { status: 'done', progress: 100 })}>
+              Mark Done
+            </button>
+            <button
+              className="btn-ghost"
+              onClick={() => onTaskPatch(selectedTask.id, { status: 'in-progress', progress: Math.min(100, Number(selectedTask.progress || 0) + 10) })}
+            >
+              Advance Progress
+            </button>
+            <button className="btn-danger" onClick={() => onTaskPatch(selectedTask.id, { status: 'blocked' })}>
+              Block
+            </button>
           </div>
         </Card>
       </div>
+
       <aside className="right-stack">
         <Card title="Approvals">
-          <ApprovalItem kind="Access Scope" reason="Need temporary write access to staging webhook." />
+          <p>{selectedTask.approvalRequired ? 'Approval is required.' : 'No approval needed.'}</p>
         </Card>
         <Card title="Files">
           <ul className="list-plain">
-            <li>funnel_events.csv</li>
-            <li>session_replay_notes.md</li>
-            <li>launch_risk_matrix.pdf</li>
-          </ul>
-        </Card>
-        <Card title="Related Tasks">
-          <ul className="list-plain">
-            <li>#8820 Investigate auth retries</li>
-            <li>#8814 Refresh funnel copy</li>
-            <li>#8799 Patch referral tracking</li>
+            <li>{selectedTask.sessionKey || 'No linked artifact'}</li>
           </ul>
         </Card>
       </aside>
@@ -369,61 +335,80 @@ Analyze event stream from last 14 days, compare cohorts, isolate breakpoints, an
   )
 }
 
-function KanbanScreen() {
-  const columns = [
-    {
-      title: 'Inbox',
-      cards: ['Audit error telemetry', 'Document routing rules', 'Q2 partner request'],
-    },
-    {
-      title: 'To Do',
-      cards: ['Refactor alert fallback', 'SLA dashboard copy update'],
-    },
-    {
-      title: 'In Progress',
-      cards: ['Worker autoscale tuning', 'Mobile onboarding A/B'],
-    },
-    {
-      title: 'Waiting / Review',
-      cards: ['Legal review: notification policy', 'Approval: model budget increase'],
-    },
-    {
-      title: 'Blocked',
-      cards: ['Deploy queue migration (missing secret)'],
-    },
-    {
-      title: 'Done',
-      cards: ['Artifact tagging rollout', 'Workspace permissions cleanup'],
-    },
-  ]
+function KanbanScreen({ tasks, onOpenTask, onTaskPatch, onCreateTask }) {
+  const columns = KANBAN_COLUMNS
+  const [search, setSearch] = useState('')
+  const [newTitle, setNewTitle] = useState('')
+  const [newDescription, setNewDescription] = useState('')
+
+  const filtered = useMemo(() => {
+    const q = search.trim().toLowerCase()
+    if (!q) return tasks
+    return tasks.filter((task) => [task.title, task.description, task.agent, task.status].join(' ').toLowerCase().includes(q))
+  }, [tasks, search])
+
+  const grouped = Object.fromEntries(columns.map((key) => [key, filtered.filter((task) => task.status === key)]))
+
   return (
     <div className="kanban-page">
       <header className="kanban-head">
         <div>
           <h2>Kanban Board</h2>
-          <p>Workspace: OpenClaw Ops • Sprint 14</p>
+          <p>Live task board from backend API</p>
         </div>
-        <div className="mini-actions">
-          <button className="btn-ghost">Filter</button>
-          <button className="btn-ghost">Group by Agent</button>
-          <button className="btn-primary">+ New Task</button>
+        <div className="mini-actions wrap-actions">
+          <input className="search-input compact-input" placeholder="Filter tasks..." value={search} onChange={(event) => setSearch(event.target.value)} />
+          <input className="search-input compact-input" placeholder="New task title" value={newTitle} onChange={(event) => setNewTitle(event.target.value)} />
+          <input className="search-input compact-input" placeholder="Description" value={newDescription} onChange={(event) => setNewDescription(event.target.value)} />
+          <button
+            className="btn-primary"
+            onClick={() => {
+              onCreateTask(newTitle, newDescription)
+              setNewTitle('')
+              setNewDescription('')
+            }}
+          >
+            + New Task
+          </button>
         </div>
       </header>
+
       <div className="kanban-board">
         {columns.map((column) => (
-          <section key={column.title} className="kanban-column">
+          <section key={column} className="kanban-column">
             <header className="row-between">
-              <h4>{column.title}</h4>
-              <small>{column.cards.length}</small>
+              <h4>{prettyLabel(column)}</h4>
+              <small>{grouped[column].length}</small>
             </header>
+
             <div className="stack-gap">
-              {column.cards.map((card) => (
-                <article key={card} className="kanban-card">
-                  <h5>{card}</h5>
-                  <p>Owner: Zeta • Updated 9m ago</p>
+              {grouped[column].map((task) => (
+                <article key={task.id} className="kanban-card">
+                  <h5>{task.title}</h5>
+                  <p>{task.description || 'No description'}</p>
                   <div className="chip-wrap">
-                    <StatusChip text="priority-high" tone="warning" />
-                    <StatusChip text="active" tone="zeta" />
+                    <StatusChip text={task.agent} tone={task.agent} />
+                    <StatusChip text={task.priority} tone={task.priority} />
+                  </div>
+                  <div className="mini-actions wrap-actions">
+                    <button className="btn-ghost" onClick={() => onOpenTask(task)}>
+                      Open
+                    </button>
+                    {column !== 'done' && (
+                      <button className="btn-success" onClick={() => onTaskPatch(task.id, { status: 'done', progress: 100 })}>
+                        Done
+                      </button>
+                    )}
+                    {column === 'inbox' && (
+                      <button className="btn-ghost" onClick={() => onTaskPatch(task.id, { status: 'assigned', progress: 20 })}>
+                        Assign
+                      </button>
+                    )}
+                    {column === 'assigned' && (
+                      <button className="btn-ghost" onClick={() => onTaskPatch(task.id, { status: 'in-progress', progress: 55 })}>
+                        Start
+                      </button>
+                    )}
                   </div>
                 </article>
               ))}
@@ -435,91 +420,82 @@ function KanbanScreen() {
   )
 }
 
-function ArtifactsScreen() {
+function ArtifactsScreen({ overview }) {
+  const artifacts = [
+    ...overview.logs.slice(0, 5).map((line, index) => ({
+      name: `log-${index + 1}.txt`,
+      meta: 'OpenClaw runtime log',
+      preview: line.slice(0, 96),
+    })),
+    ...overview.sessions.slice(0, 4).map((session) => ({
+      name: `${session.agent}-${session.id}.json`,
+      meta: session.model,
+      preview: session.sessionKey,
+    })),
+  ]
+
   return (
     <div className="content-grid">
       <div className="main-stack">
-        <Card title="Artifacts Library" action="Upload">
+        <Card title="Artifacts Library">
           <div className="feed-list">
-            {[
-              'Launch summary v2.pdf',
-              'Agent handoff checklist.md',
-              'Onboarding heatmap.png',
-              'Risk register.qmd',
-              'Quarterly throughput.csv',
-            ].map((name) => (
-              <article key={name} className="feed-row">
-                <div>
-                  <h4>{name}</h4>
-                  <p>Updated today • OpenClaw Ops</p>
-                </div>
-                <div className="mini-actions">
-                  <button className="btn-ghost">Preview</button>
-                  <button className="btn-ghost">Share</button>
-                </div>
-              </article>
+            {artifacts.map((artifact) => (
+              <FeedRow
+                key={artifact.name}
+                item={{
+                  title: artifact.name,
+                  subtitle: `${artifact.meta} - ${artifact.preview}`,
+                  state: 'info',
+                }}
+              />
             ))}
           </div>
         </Card>
       </div>
+
       <aside className="right-stack">
         <Card title="Preview">
           <div className="preview-box">
-            <p>Artifact Canvas</p>
+            <p>Artifacts are inferred from sessions and logs.</p>
           </div>
-        </Card>
-        <Card title="Metadata">
-          <ul className="list-plain">
-            <li>Owner: Ops Team</li>
-            <li>Visibility: Workspace</li>
-            <li>Tags: launch, risk, summary</li>
-          </ul>
         </Card>
       </aside>
     </div>
   )
 }
 
-function WorkspacesScreen() {
+function WorkspacesScreen({ overview }) {
+  const workspaces = [
+    { name: overview.workspace, members: `${overview.agents.length} agents`, state: 'Active' },
+    { name: 'Finance Dashboard', members: '2 services', state: 'Active' },
+    { name: 'Memory', members: 'workspace files', state: 'Ready' },
+  ]
+
   return (
     <div className="content-grid">
       <div className="main-stack">
-        <Card title="Workspaces" action="+ New Workspace">
+        <Card title="Workspaces">
           <div className="feed-list">
-            {[
-              ['OpenClaw Ops', '14 members', 'Active'],
-              ['Payments Core', '9 members', 'Active'],
-              ['Marketing Q2', '7 members', 'Idle'],
-              ['Sandbox R&D', '4 members', 'Archived soon'],
-            ].map(([name, members, state]) => (
-              <article key={name} className="feed-row">
-                <div>
-                  <h4>{name}</h4>
-                  <p>{members}</p>
-                </div>
-                <div className="mini-actions">
-                  <StatusChip text={state} tone={state === 'Active' ? 'success' : 'warning'} />
-                  <button className="btn-ghost">Open</button>
-                  <button className="btn-ghost">Manage</button>
-                </div>
-              </article>
+            {workspaces.map((workspace) => (
+              <FeedRow
+                key={workspace.name}
+                item={{
+                  title: workspace.name,
+                  subtitle: workspace.members,
+                  state: workspace.state,
+                }}
+              />
             ))}
           </div>
         </Card>
       </div>
+
       <aside className="right-stack">
-        <Card title="Workspace Defaults">
+        <Card title="Gateway Summary">
           <ul className="list-plain">
-            <li>Memory retention: 30 days</li>
-            <li>Approvals: Required for deploy ops</li>
-            <li>Preferred agent: Zeta</li>
-          </ul>
-        </Card>
-        <Card title="Permissions">
-          <ul className="list-plain">
-            <li>Coding: write + execute</li>
-            <li>Reasoning: analyze + synthesize</li>
-            <li>Vision: media + annotation</li>
+            <li>Connected: {overview.gateway.connected ? 'Yes' : 'No'}</li>
+            <li>Status file: {overview.gateway.statusPath || 'not found'}</li>
+            <li>Channels: {overview.gateway.channelSummary.length}</li>
           </ul>
         </Card>
       </aside>
@@ -527,157 +503,248 @@ function WorkspacesScreen() {
   )
 }
 
-function ActivityLogsScreen() {
+function ActivityLogsScreen({ overview }) {
+  const [filter, setFilter] = useState('all')
+  const rows = useMemo(() => {
+    if (filter === 'all') return overview.activity
+    return overview.activity.filter((item) => item.type === filter)
+  }, [overview.activity, filter])
+
   return (
     <div className="content-grid">
       <div className="main-stack">
-        <Card title="Activity Logs" action="Export">
+        <Card
+          title="Activity Logs"
+          action={
+            <select className="select-input" value={filter} onChange={(event) => setFilter(event.target.value)}>
+              <option value="all">All</option>
+              <option value="info">Info</option>
+              <option value="inbox">Inbox</option>
+              <option value="assigned">Assigned</option>
+              <option value="in-progress">In Progress</option>
+              <option value="blocked">Blocked</option>
+              <option value="done">Done</option>
+            </select>
+          }
+        >
           <div className="timeline">
-            {[
-              ['10:11:04', 'info', 'Task #8842 command accepted by Zeta'],
-              ['10:11:28', 'route', 'Task delegated to Coding and Reasoning'],
-              ['10:12:09', 'approval_required', 'Deploy scope elevation requested'],
-              ['10:13:41', 'blocked', 'Secret key missing on runner-03'],
-              ['10:15:10', 'complete', 'Artifact generated and saved'],
-            ].map(([time, state, detail]) => (
-              <div className="timeline-row" key={time + detail}>
-                <small>{time}</small>
+            {rows.map((item) => (
+              <div className="timeline-row" key={item.id}>
+                <small>{new Date(item.time).toLocaleTimeString()}</small>
                 <div>
-                  <StatusChip text={state} tone={state.includes('blocked') ? 'error' : 'zeta'} />
-                  <p>{detail}</p>
+                  <StatusChip text={item.type} tone={item.type} />
+                  <p>{item.detail}</p>
                 </div>
               </div>
             ))}
           </div>
         </Card>
       </div>
+
       <aside className="right-stack">
-        <Card title="Event Inspector">
-          <pre className="code-box">
-event_id: ev_31fd9
-source: runner-03
-request: deploy_scope:elevated
-status: blocked
-reason: SECRET_MISSING
-          </pre>
+        <Card title="Recent Runtime Logs">
+          <pre className="code-box">{overview.logs.slice(-15).join('\n') || 'No logs found'}</pre>
         </Card>
       </aside>
     </div>
   )
 }
 
-function SettingsScreen() {
+function SettingsScreen({ settings, onSave }) {
+  const [draft, setDraft] = useState(settings)
+  const [savedAt, setSavedAt] = useState('')
+
+  useEffect(() => {
+    setDraft(settings)
+  }, [settings])
+
+  const fields = [
+    ['organizationName', 'Organization Name'],
+    ['defaultWorkspace', 'Default Workspace'],
+    ['region', 'Region'],
+    ['timeFormat', 'Time Format'],
+    ['criticalAlerts', 'Critical alerts'],
+    ['approvalReminders', 'Approval reminders'],
+    ['digestSummary', 'Digest summary'],
+    ['incidentChannel', 'Incident channel'],
+    ['primaryModel', 'Primary model'],
+    ['fallbackModel', 'Fallback model'],
+    ['maxAutoRuns', 'Max auto-runs'],
+    ['budgetGuardrail', 'Budget guardrail'],
+  ]
+
+  async function handleSave() {
+    await onSave(draft)
+    setSavedAt(new Date().toLocaleTimeString())
+  }
+
   return (
     <div className="content-grid">
       <div className="main-stack">
-        <Card title="General">
+        <Card title="Settings" action={savedAt ? <small>Saved at {savedAt}</small> : null}>
           <div className="settings-grid">
-            <label>
-              Organization Name
-              <input defaultValue="OpenClaw Labs" />
-            </label>
-            <label>
-              Default Workspace
-              <input defaultValue="OpenClaw Ops" />
-            </label>
-            <label>
-              Region
-              <input defaultValue="Singapore" />
-            </label>
-            <label>
-              Time Format
-              <input defaultValue="24-hour" />
-            </label>
+            {fields.map(([key, label]) => (
+              <label key={key}>
+                {label}
+                <input value={draft[key] || ''} onChange={(event) => setDraft((current) => ({ ...current, [key]: event.target.value }))} />
+              </label>
+            ))}
           </div>
-        </Card>
-        <Card title="Notifications">
-          <div className="settings-grid">
-            <label>
-              Critical alerts
-              <input defaultValue="Email + In-app" />
-            </label>
-            <label>
-              Approval reminders
-              <input defaultValue="Every 10 minutes" />
-            </label>
-            <label>
-              Digest summary
-              <input defaultValue="Daily at 18:00" />
-            </label>
-            <label>
-              Incident channel
-              <input defaultValue="#ops-alerts" />
-            </label>
-          </div>
-        </Card>
-        <Card title="Model Preferences">
-          <div className="settings-grid">
-            <label>
-              Primary model
-              <input defaultValue="gpt5.4-inv" />
-            </label>
-            <label>
-              Fallback model
-              <input defaultValue="gpt5.3-fast" />
-            </label>
-            <label>
-              Max auto-runs
-              <input defaultValue="4" />
-            </label>
-            <label>
-              Budget guardrail
-              <input defaultValue="$120/day" />
-            </label>
+          <div className="mini-actions top-gap">
+            <button className="btn-primary" onClick={handleSave}>
+              Save Settings
+            </button>
           </div>
         </Card>
       </div>
-      <aside className="right-stack">
-        <Card title="Quick Toggles">
-          <div className="shortcut-grid">
-            <button className="btn-ghost">Enable Auto-Route</button>
-            <button className="btn-ghost">Force Approvals</button>
-            <button className="btn-ghost">Lock Deployments</button>
-            <button className="btn-primary">Save Settings</button>
-          </div>
-        </Card>
-        <Card title="Danger Zone">
-          <div className="stack-gap">
-            <button className="btn-danger">Reset Workspace Memory</button>
-            <button className="btn-danger">Archive Organization</button>
-          </div>
-        </Card>
-      </aside>
     </div>
   )
 }
 
-function App() {
-  const appName = import.meta.env.VITE_APP_NAME || 'OpenClaw Command Center'
-  const sideLabel = sideNav.map((item) => item.label).join(', ')
+function AppShell() {
+  const navigate = useNavigate()
+  const location = useLocation()
+
+  const [overview, setOverview] = useState({
+    appName: 'OpenClaw Command Center',
+    workspace: 'OpenClaw Ops',
+    sessions: [],
+    agents: [],
+    tasks: [],
+    approvals: [],
+    activity: [],
+    productivity: {},
+    system: { memory: {}, disk: {}, uptime: 0 },
+    logs: [],
+    gateway: { connected: false, statusPath: null, channelSummary: [] },
+    generatedAt: Date.now(),
+  })
+
+  const [settings, setSettings] = useState({})
+  const [selectedTask, setSelectedTask] = useState(null)
+  const [command, setCommand] = useState('openclaw status')
+  const [commandOutput, setCommandOutput] = useState('No command executed yet.')
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [streamConnected, setStreamConnected] = useState(false)
+
+  const loadOverview = useCallback(async () => {
+    try {
+      const [overviewData, settingsData] = await Promise.all([
+        fetch('/api/overview').then((response) => response.json()),
+        fetch('/api/settings').then((response) => response.json()),
+      ])
+      setOverview(overviewData)
+      setSettings(settingsData)
+      if (selectedTask) {
+        const refreshed = overviewData.tasks.find((task) => task.id === selectedTask.id)
+        if (refreshed) setSelectedTask(refreshed)
+      }
+      setError('')
+    } catch (loadError) {
+      setError(loadError.message || 'Failed to load overview')
+    } finally {
+      setLoading(false)
+    }
+  }, [selectedTask])
+
+  useEffect(() => {
+    loadOverview()
+    const fallback = setInterval(loadOverview, 30000)
+
+    const stream = new EventSource('/api/stream')
+    stream.addEventListener('hello', () => setStreamConnected(true))
+    stream.addEventListener('overview', (event) => {
+      setStreamConnected(true)
+      try {
+        const incoming = JSON.parse(event.data)
+        setOverview(incoming)
+      } catch {
+        // ignore malformed stream events
+      }
+    })
+    stream.onerror = () => setStreamConnected(false)
+
+    return () => {
+      clearInterval(fallback)
+      stream.close()
+    }
+  }, [loadOverview])
+
+  async function patchTask(taskId, patch) {
+    await fetch(`/api/tasks/${taskId}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    })
+    await loadOverview()
+  }
+
+  async function createTask(title, description) {
+    if (!title.trim()) return
+    await fetch('/api/tasks', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, description, agent: 'main', priority: 'normal' }),
+    })
+    await loadOverview()
+  }
+
+  async function saveSettings(nextSettings) {
+    const response = await fetch('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(nextSettings),
+    })
+    const data = await response.json()
+    setSettings(data)
+  }
+
+  async function runCommand() {
+    const response = await fetch('/api/command', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ command }),
+    })
+    const data = await response.json()
+    setCommandOutput([`$ ${data.command || command}`, data.stdout || '', data.stderr || '', data.error || ''].filter(Boolean).join('\n'))
+  }
+
+  function openTask(task) {
+    setSelectedTask(task)
+    navigate('/command-center')
+  }
+
+  const navWithBadges = sideNav.map((item) => {
+    if (item.label === 'Command Center') return { ...item, badge: selectedTask ? '1' : '' }
+    if (item.label === 'Kanban') return { ...item, badge: String(overview.tasks.length || '') }
+    if (item.label === 'Activity Logs') return { ...item, badge: String(overview.activity.length || '') }
+    return { ...item, badge: '' }
+  })
+
   return (
     <div className="app-root">
       <div className="app-shell">
         <header className="top-nav">
           <div className="top-left">
-            <strong>{appName}</strong>
-            <button className="btn-ghost">Workspace: OpenClaw Ops</button>
+            <strong>{overview.appName}</strong>
+            <button className="btn-ghost">Workspace: {overview.workspace}</button>
+            <StatusChip text={streamConnected ? 'Live Sync' : 'Polling Mode'} tone={streamConnected ? 'success' : 'warning'} />
+            <StatusChip text={overview.gateway.connected ? 'Gateway Connected' : 'Gateway Offline'} tone={overview.gateway.connected ? 'success' : 'error'} />
           </div>
+
           <div className="top-actions">
-            <input className="search-input" defaultValue="Search commands, tasks, artifacts..." />
-            <button className="btn-primary">New Command</button>
-            <button className="btn-ghost">Alerts 3</button>
-            <button className="btn-ghost">Profile</button>
+            <input className="search-input" value={location.pathname} readOnly />
+            <button className="btn-primary" onClick={loadOverview}>
+              Refresh
+            </button>
           </div>
         </header>
 
         <div className="app-body">
-          <aside className="side-nav" aria-label={sideLabel}>
-            {sideNav.map((item) => (
-              <NavLink
-                key={item.to}
-                to={item.to}
-                className={({ isActive }) => `side-link ${isActive ? 'active' : ''}`}
-              >
+          <aside className="side-nav">
+            {navWithBadges.map((item) => (
+              <NavLink key={item.to} to={item.to} className={({ isActive }) => `side-link ${isActive ? 'active' : ''}`}>
                 <span>{item.label}</span>
                 {item.badge && <small className="nav-badge">{item.badge}</small>}
               </NavLink>
@@ -685,16 +752,37 @@ function App() {
           </aside>
 
           <main className="page-main">
-            <Routes>
-              <Route path="/" element={<Navigate to="/dashboard" replace />} />
-              <Route path="/dashboard" element={<DashboardScreen />} />
-              <Route path="/command-center" element={<CommandCenterScreen />} />
-              <Route path="/kanban" element={<KanbanScreen />} />
-              <Route path="/artifacts" element={<ArtifactsScreen />} />
-              <Route path="/workspaces" element={<WorkspacesScreen />} />
-              <Route path="/activity-logs" element={<ActivityLogsScreen />} />
-              <Route path="/settings" element={<SettingsScreen />} />
-            </Routes>
+            {loading ? (
+              <p>Loading dashboard...</p>
+            ) : error ? (
+              <p>{error}</p>
+            ) : (
+              <Routes>
+                <Route
+                  path="/dashboard"
+                  element={
+                    <DashboardScreen
+                      overview={overview}
+                      onOpenTask={openTask}
+                      command={command}
+                      setCommand={setCommand}
+                      onRunCommand={runCommand}
+                      commandOutput={commandOutput}
+                    />
+                  }
+                />
+                <Route
+                  path="/command-center"
+                  element={<CommandCenterScreen selectedTask={selectedTask} overview={overview} onTaskPatch={patchTask} />}
+                />
+                <Route path="/kanban" element={<KanbanScreen tasks={overview.tasks} onOpenTask={openTask} onTaskPatch={patchTask} onCreateTask={createTask} />} />
+                <Route path="/artifacts" element={<ArtifactsScreen overview={overview} />} />
+                <Route path="/workspaces" element={<WorkspacesScreen overview={overview} />} />
+                <Route path="/activity-logs" element={<ActivityLogsScreen overview={overview} />} />
+                <Route path="/settings" element={<SettingsScreen settings={settings} onSave={saveSettings} />} />
+                <Route path="/" element={<Navigate to="/dashboard" replace />} />
+              </Routes>
+            )}
           </main>
         </div>
       </div>
@@ -702,5 +790,9 @@ function App() {
   )
 }
 
-export default App
+export default function App() {
+  return <AppShell />
+}
+
+
 

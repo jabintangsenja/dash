@@ -3,5 +3,16 @@ services:
     build: .
     container_name: openclaw-ui
     ports:
-      - "8080:80"
+      - "7070:7070"
+    environment:
+      NODE_ENV: production
+      PORT: 7070
+      OPENCLAW_ROOT: /host-openclaw
+      OPENCLAW_WORKSPACE: /host-openclaw/workspace
+      OPENCLAW_STATUS_PATH: /host-openclaw/workspace/gateway-status.json
+      OPENCLAW_LOG_DIR: /tmp/openclaw
+    volumes:
+      - ./data:/app/data
+      - /root/.openclaw:/host-openclaw:ro
+      - /tmp/openclaw:/tmp/openclaw:ro
     restart: unless-stopped
