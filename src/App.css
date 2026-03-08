@@ -633,6 +633,14 @@ small {
   flex-wrap: wrap;
 }
 
+.wrap-actions {
+  flex-wrap: wrap;
+}
+
+.top-gap {
+  margin-top: 16px;
+}
+
 .code-box {
   margin: 0;
   border-radius: 12px;

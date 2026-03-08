@@ -1,5 +1,4 @@
 ﻿/* global process */
-import cors from 'cors'
 import express from 'express'
 import fs from 'fs'
 import os from 'os'
@@ -19,18 +18,34 @@ const DIST_DIR = path.join(__dirname, 'dist')
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, 'data')
 const TASKS_FILE = path.join(DATA_DIR, 'tasks.json')
 const SETTINGS_FILE = path.join(DATA_DIR, 'settings.json')
+const COMMANDS_FILE = path.join(DATA_DIR, 'commands.json')
 const REPORTS_DB_FILE = path.join(DATA_DIR, 'reports.sqlite')
 const MEMORY_FILE = path.join(DATA_DIR, 'memory.md')
 const OPENCLAW_ROOT = process.env.OPENCLAW_ROOT || '/root/.openclaw'
 const OPENCLAW_WORKSPACE = process.env.OPENCLAW_WORKSPACE || path.join(OPENCLAW_ROOT, 'workspace')
 const OPENCLAW_STATUS_PATH = process.env.OPENCLAW_STATUS_PATH || ''
 const OPENCLAW_LOG_DIR = process.env.OPENCLAW_LOG_DIR || '/tmp/openclaw'
+const OPENCLAW_CLI_PATH = process.env.OPENCLAW_CLI_PATH || 'openclaw'
+const OPENCLAW_STATE_DIR = process.env.OPENCLAW_STATE_DIR || OPENCLAW_ROOT
+const OPENCLAW_CONFIG_PATH = process.env.OPENCLAW_CONFIG_PATH || path.join(OPENCLAW_STATE_DIR, 'openclaw.json')
+const TASK_RUN_TIMEOUT_SECONDS = Number(process.env.OPENCLAW_TASK_RUN_TIMEOUT_SECONDS || 180)
 const STATUS_FILE_STALE_MS = Number(process.env.OPENCLAW_STATUS_STALE_MS || 60000)
 const REPORT_TIMEZONE = process.env.REPORT_TIMEZONE || 'Asia/Jakarta'
+const ARTIFACT_EXTENSIONS = new Set(['.md', '.json', '.log', '.pdf'])
+const ARTIFACT_IGNORE_DIRS = new Set(['node_modules', '.git', 'dist', 'build', '.cache'])
+const ARTIFACT_DENY_PATTERNS = [/secret/i, /token/i, /credential/i, /password/i, /\.env/i, /private[-_.]?key/i]
+const REQUIRED_ACTION_HEADER = 'x-openclaw-action'
+const REQUIRED_ACTION_VALUE = '1'
 
 const TASK_STATUSES = new Set(['inbox', 'assigned', 'todo', 'in-progress', 'waiting-review', 'blocked', 'done'])
 const TASK_PRIORITIES = new Set(['low', 'normal', 'high', 'urgent'])
 const ALLOWED_COMMANDS = new Set(['openclaw', 'docker', 'git', 'node', 'npm', 'pwd', 'ls', 'cat', 'echo'])
+const AGENT_RUNTIME_MAP = {
+  main: 'main',
+  coding: 'coding',
+  reasoning: 'reasoning',
+  vision: 'vision',
+}
 
 const DEFAULT_SETTINGS = {
   organizationName: 'OpenClaw Labs',
@@ -69,9 +84,21 @@ let cliStatusCache = {
 
 let openClawCliAvailable = null
 let reportDb = null
+const actionRateLimitStore = new Map()
 
-app.use(cors())
 app.use(express.json({ limit: '2mb' }))
+app.use((req, res, next) => {
+  if (req.method === 'GET' || req.method === 'HEAD' || req.method === 'OPTIONS') return next()
+  if (!req.path.startsWith('/api/')) return next()
+  if (
+    req.path.startsWith('/api/tasks') ||
+    req.path.startsWith('/api/settings') ||
+    req.path.startsWith('/api/command')
+  ) {
+    return enforceActionGuard(req, res, next)
+  }
+  return next()
+})
 
 ensureDataStore()
 
@@ -79,6 +106,7 @@ function ensureDataStore() {
   fs.mkdirSync(DATA_DIR, { recursive: true })
   if (!fs.existsSync(TASKS_FILE)) fs.writeFileSync(TASKS_FILE, '[]\n')
   if (!fs.existsSync(SETTINGS_FILE)) fs.writeFileSync(SETTINGS_FILE, `${JSON.stringify(DEFAULT_SETTINGS, null, 2)}\n`)
+  if (!fs.existsSync(COMMANDS_FILE)) fs.writeFileSync(COMMANDS_FILE, '[]\n')
   if (!fs.existsSync(MEMORY_FILE)) {
     fs.writeFileSync(
       MEMORY_FILE,
@@ -133,6 +161,217 @@ function readJsonSafe(file, fallback) {
 
 function writeJson(file, value) {
   fs.writeFileSync(file, `${JSON.stringify(value, null, 2)}\n`)
+}
+
+function parseJsonFromText(raw) {
+  const text = String(raw || '').trim()
+  if (!text) return null
+  try {
+    return JSON.parse(text)
+  } catch {
+    const start = text.indexOf('{')
+    const end = text.lastIndexOf('}')
+    if (start >= 0 && end > start) {
+      try {
+        return JSON.parse(text.slice(start, end + 1))
+      } catch {
+        return null
+      }
+    }
+    return null
+  }
+}
+
+function readCommandHistory() {
+  return readJsonSafe(COMMANDS_FILE, [])
+}
+
+function appendCommandHistory(entry) {
+  const rows = readCommandHistory()
+  rows.unshift(entry)
+  writeJson(COMMANDS_FILE, rows.slice(0, 200))
+}
+
+function hasSensitiveArtifactName(name) {
+  return ARTIFACT_DENY_PATTERNS.some((pattern) => pattern.test(name))
+}
+
+function sameOriginRequest(req) {
+  const host = String(req.headers.host || '')
+  const origin = String(req.headers.origin || '')
+  const referer = String(req.headers.referer || '')
+  if (!host) return false
+  if (!origin && !referer) return true
+  return origin.includes(host) || referer.includes(host)
+}
+
+function actionRateLimitKey(req) {
+  return `${req.ip || req.socket?.remoteAddress || 'unknown'}:${req.path}`
+}
+
+function checkActionRateLimit(req, windowMs = 60000, maxHits = 120) {
+  const key = actionRateLimitKey(req)
+  const now = Date.now()
+  const state = actionRateLimitStore.get(key) || { count: 0, resetAt: now + windowMs }
+  if (now > state.resetAt) {
+    state.count = 0
+    state.resetAt = now + windowMs
+  }
+  state.count += 1
+  actionRateLimitStore.set(key, state)
+  return state.count <= maxHits
+}
+
+function enforceActionGuard(req, res, next) {
+  if (!checkActionRateLimit(req)) {
+    return res.status(429).json({ error: 'Too many action requests. Retry in a minute.' })
+  }
+  if (!sameOriginRequest(req)) {
+    return res.status(403).json({ error: 'Cross-origin action request is blocked.' })
+  }
+  if (String(req.headers[REQUIRED_ACTION_HEADER] || '') !== REQUIRED_ACTION_VALUE) {
+    return res.status(403).json({ error: `Missing required action header "${REQUIRED_ACTION_HEADER}".` })
+  }
+  return next()
+}
+
+function scanArtifacts(rootDir, options = {}) {
+  const maxEntries = Number.isFinite(options.maxEntries) ? options.maxEntries : 200
+  const results = []
+
+  function walk(dir) {
+    if (results.length >= maxEntries) return
+    let entries = []
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+
+    for (const entry of entries) {
+      if (results.length >= maxEntries) return
+      if (entry.name.startsWith('.')) continue
+      if (hasSensitiveArtifactName(entry.name)) continue
+
+      const fullPath = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (ARTIFACT_IGNORE_DIRS.has(entry.name)) continue
+        walk(fullPath)
+        continue
+      }
+
+      if (!entry.isFile()) continue
+      const ext = path.extname(entry.name).toLowerCase()
+      if (!ARTIFACT_EXTENSIONS.has(ext)) continue
+
+      try {
+        const stats = fs.statSync(fullPath)
+        results.push({
+          name: entry.name,
+          path: path.relative(rootDir, fullPath),
+          size: stats.size,
+          modifiedAt: stats.mtime.toISOString(),
+          extension: ext.slice(1),
+        })
+      } catch {
+        // ignore unreadable files
+      }
+    }
+  }
+
+  walk(rootDir)
+  return results.sort((a, b) => new Date(b.modifiedAt).getTime() - new Date(a.modifiedAt).getTime())
+}
+
+function listDockerContainers() {
+  const containers = []
+  let error = ''
+
+  try {
+    const output = execFileSync('docker', ['ps', '--format', '{{json .}}'], { encoding: 'utf8' })
+    const lines = output.trim().split('\n').filter(Boolean)
+    for (const line of lines) {
+      try {
+        containers.push(JSON.parse(line))
+      } catch {
+        // ignore malformed lines
+      }
+    }
+  } catch (err) {
+    error = err?.message || 'Failed to query docker containers.'
+  }
+
+  return { containers, error }
+}
+
+function directorySizeSafe(rootDir, maxEntries = 2000) {
+  let total = 0
+  let visited = 0
+  const stack = [rootDir]
+  while (stack.length && visited < maxEntries) {
+    const dir = stack.pop()
+    let entries = []
+    try {
+      entries = fs.readdirSync(dir, { withFileTypes: true })
+    } catch {
+      continue
+    }
+    for (const entry of entries) {
+      if (visited >= maxEntries) break
+      if (entry.name.startsWith('.')) continue
+      visited += 1
+      const fullPath = path.join(dir, entry.name)
+      if (entry.isDirectory()) {
+        if (!ARTIFACT_IGNORE_DIRS.has(entry.name)) stack.push(fullPath)
+        continue
+      }
+      if (!entry.isFile()) continue
+      try {
+        total += fs.statSync(fullPath).size
+      } catch {
+        // ignore unreadable files
+      }
+    }
+  }
+  return {
+    bytes: total,
+    partial: visited >= maxEntries,
+  }
+}
+
+function listWorkspaceDirectories() {
+  const directories = []
+  let error = ''
+
+  if (!fs.existsSync(OPENCLAW_WORKSPACE)) {
+    return { directories, error: `Workspace not found at ${OPENCLAW_WORKSPACE}` }
+  }
+
+  try {
+    const entries = fs.readdirSync(OPENCLAW_WORKSPACE, { withFileTypes: true })
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue
+      const fullPath = path.join(OPENCLAW_WORKSPACE, entry.name)
+      try {
+        const stats = fs.statSync(fullPath)
+        const sizeInfo = directorySizeSafe(fullPath)
+        directories.push({
+          name: entry.name,
+          path: path.relative(OPENCLAW_WORKSPACE, fullPath),
+          fullPath,
+          size: sizeInfo.bytes,
+          sizePartial: sizeInfo.partial,
+          modifiedAt: stats.mtime.toISOString(),
+        })
+      } catch {
+        // ignore unreadable directory
+      }
+    }
+  } catch (err) {
+    error = err?.message || 'Failed to read workspace directories.'
+  }
+
+  return { directories, error }
 }
 
 function localDateTimeParts(isoLike) {
@@ -434,21 +673,28 @@ function readGatewayStatusFromCli() {
   if (openClawCliAvailable === false) return null
   const now = Date.now()
   if (now - cliStatusCache.checkedAt < 10000) return cliStatusCache.data
+  const cliEnv = {
+    ...process.env,
+    OPENCLAW_STATE_DIR,
+    OPENCLAW_CONFIG_PATH,
+  }
 
   try {
     if (openClawCliAvailable === null) {
-      execFileSync('openclaw', ['--version'], { stdio: 'ignore', timeout: 2000 })
+      execFileSync(OPENCLAW_CLI_PATH, ['--version'], { stdio: 'ignore', timeout: 2000, env: cliEnv })
       openClawCliAvailable = true
     }
-    const output = execFileSync('openclaw', ['status', '--json', '--no-color', '--log-level', 'silent'], {
+    const output = execFileSync(OPENCLAW_CLI_PATH, ['status', '--json', '--no-color', '--log-level', 'silent'], {
       encoding: 'utf8',
       timeout: 10000,
+      env: cliEnv,
     })
-    const parsed = JSON.parse(output)
+    const parsed = parseJsonFromText(output)
+    if (!parsed) throw new Error('Failed to parse JSON from openclaw status.')
     cliStatusCache = {
       checkedAt: now,
       data: {
-        path: 'openclaw status --json',
+        path: `${OPENCLAW_CLI_PATH} status --json`,
         data: parsed,
         source: 'cli',
       },
@@ -516,18 +762,18 @@ function readGatewayStatus() {
     }
   }
 
-  const sessionFileStatus = readGatewayStatusFromSessionFiles()
-  if (sessionFileStatus) {
-    return {
-      ...sessionFileStatus,
-      stalePath: gatewayPath,
-    }
-  }
-
   const cliStatus = readGatewayStatusFromCli()
   if (cliStatus) {
     return {
       ...cliStatus,
+      stalePath: gatewayPath,
+    }
+  }
+
+  const sessionFileStatus = readGatewayStatusFromSessionFiles()
+  if (sessionFileStatus) {
+    return {
+      ...sessionFileStatus,
       stalePath: gatewayPath,
     }
   }
@@ -579,12 +825,24 @@ function summarizeAgents(sessions) {
 function withTaskWorkspace(tasks, defaultWorkspace) {
   let changed = false
   const normalized = tasks.map((task) => {
-    if (task.workspace) return task
-    changed = true
-    return {
-      ...task,
-      workspace: defaultWorkspace,
+    const next = { ...task }
+    if (!next.workspace) {
+      next.workspace = defaultWorkspace
+      changed = true
     }
+    if (!Object.hasOwn(next, 'lastRunAt')) {
+      next.lastRunAt = null
+      changed = true
+    }
+    if (!Object.hasOwn(next, 'lastRunStatus')) {
+      next.lastRunStatus = null
+      changed = true
+    }
+    if (!Object.hasOwn(next, 'lastRunError')) {
+      next.lastRunError = null
+      changed = true
+    }
+    return next
   })
   if (changed) writeJson(TASKS_FILE, normalized)
   return normalized
@@ -605,6 +863,9 @@ function bootstrapTasks(sessions, defaultWorkspace) {
     progress: index === 0 ? 72 : index === 1 ? 38 : 12,
     approvalRequired: session.status === 'rate_limited',
     sessionKey: session.sessionKey,
+    lastRunAt: null,
+    lastRunStatus: null,
+    lastRunError: null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   }))
@@ -717,6 +978,7 @@ function buildOverview() {
   const agents = summarizeAgents(sessions)
   const activity = createActivity(tasks, sessions)
   const reports = listReports(120)
+  const commandHistory = readCommandHistory().slice(0, 20)
 
   return {
     appName: process.env.VITE_APP_NAME || 'OpenClaw Command Center',
@@ -730,6 +992,7 @@ function buildOverview() {
     system: getSystemStats(),
     logs: getLatestLogLines(),
     reports,
+    commandHistory,
     reportSummary: {
       doneTasks: reports.length,
       lastReportAt: reports[0]?.completedAt || null,
@@ -765,8 +1028,12 @@ function sanitizeTaskPatch(payload = {}) {
   if (typeof payload.progress === 'number') patch.progress = Math.max(0, Math.min(100, Math.round(payload.progress)))
   if (typeof payload.approvalRequired === 'boolean') patch.approvalRequired = payload.approvalRequired
   if (typeof payload.sessionKey === 'string') patch.sessionKey = payload.sessionKey.slice(0, 240)
+  if (payload.sessionKey === null) patch.sessionKey = null
   if (Array.isArray(payload.contributors)) patch.contributors = payload.contributors.map((value) => String(value).slice(0, 60)).slice(0, 10)
   if (Array.isArray(payload.modelHints)) patch.modelHints = payload.modelHints.map((value) => String(value).slice(0, 80)).slice(0, 10)
+  if (typeof payload.lastRunAt === 'string') patch.lastRunAt = payload.lastRunAt
+  if (typeof payload.lastRunStatus === 'string') patch.lastRunStatus = payload.lastRunStatus.slice(0, 40)
+  if (typeof payload.lastRunError === 'string') patch.lastRunError = payload.lastRunError.slice(0, 500)
   return patch
 }
 
@@ -776,6 +1043,116 @@ function publishOverview() {
   for (const response of streamClients) {
     response.write(`event: overview\n`)
     response.write(`data: ${payload}\n\n`)
+  }
+}
+
+function readTasks() {
+  return readJsonSafe(TASKS_FILE, [])
+}
+
+function saveTasks(tasks) {
+  writeJson(TASKS_FILE, tasks)
+}
+
+function updateTask(taskId, updater) {
+  const tasks = readTasks()
+  const index = tasks.findIndex((task) => task.id === taskId)
+  if (index === -1) return null
+  const current = tasks[index]
+  const next = {
+    ...current,
+    ...updater(current),
+    updatedAt: new Date().toISOString(),
+  }
+  tasks[index] = next
+  saveTasks(tasks)
+  return { previous: current, task: next }
+}
+
+function buildTaskPrompt(task) {
+  const lines = [
+    `Task Title: ${task.title}`,
+    `Assigned Agent: ${task.agent}`,
+    `Priority: ${task.priority}`,
+    `Workspace: ${task.workspace || 'OpenClaw Ops'}`,
+    '',
+    'Task Description:',
+    task.description || 'No description provided.',
+  ]
+
+  if (Array.isArray(task.contributors) && task.contributors.length) {
+    lines.push('', `Known Contributors: ${task.contributors.join(', ')}`)
+  }
+  if (Array.isArray(task.modelHints) && task.modelHints.length) {
+    lines.push(`Model Hints: ${task.modelHints.join(', ')}`)
+  }
+
+  lines.push(
+    '',
+    'Execution Request:',
+    'Please execute this task in the specified workspace, report progress, and produce concrete results. Keep the final output concise and implementation-focused.',
+  )
+
+  return lines.join('\n')
+}
+
+function readAgentSessionsRaw(agentId) {
+  const sessionFile = path.join(OPENCLAW_ROOT, 'agents', agentId, 'sessions', 'sessions.json')
+  const sessions = readJsonSafe(sessionFile, {})
+  return {
+    file: sessionFile,
+    sessions: sessions && typeof sessions === 'object' ? sessions : {},
+  }
+}
+
+function latestSessionKeyFromSessions(sessions) {
+  const keys = Object.keys(sessions || {})
+  if (!keys.length) return null
+  return keys.sort((a, b) => Number(sessions[b]?.updatedAt || 0) - Number(sessions[a]?.updatedAt || 0))[0]
+}
+
+function spawnOpenClawTask(task) {
+  const runtimeAgent = AGENT_RUNTIME_MAP[task.agent] || 'main'
+  const prompt = buildTaskPrompt(task)
+  const beforeState = readAgentSessionsRaw(runtimeAgent)
+  const beforeKeys = new Set(Object.keys(beforeState.sessions))
+  const cliEnv = {
+    ...process.env,
+    OPENCLAW_STATE_DIR,
+    OPENCLAW_CONFIG_PATH,
+  }
+
+  const output = execFileSync(
+    OPENCLAW_CLI_PATH,
+    ['agent', '--agent', runtimeAgent, `--message=${prompt}`, '--json', '--timeout', String(Math.max(30, TASK_RUN_TIMEOUT_SECONDS))],
+    {
+      encoding: 'utf8',
+      timeout: Math.max(60000, TASK_RUN_TIMEOUT_SECONDS * 1000 + 10000),
+      maxBuffer: 1024 * 1024 * 8,
+      env: cliEnv,
+    },
+  )
+
+  const parsed = parseJsonFromText(output)
+  const explicitSessionId = parsed?.result?.meta?.agentMeta?.sessionId || null
+  const afterState = readAgentSessionsRaw(runtimeAgent)
+  const afterSessions = afterState.sessions
+  const afterKeys = Object.keys(afterSessions)
+  const freshKey = afterKeys.find((key) => !beforeKeys.has(key))
+  const bySessionId = explicitSessionId
+    ? afterKeys.find((key) => String(afterSessions[key]?.sessionId || '') === String(explicitSessionId))
+    : null
+  const latestKey = latestSessionKeyFromSessions(afterSessions)
+  const sessionKey = freshKey || bySessionId || latestKey
+  if (!sessionKey) {
+    throw new Error('No session key detected after dispatch.')
+  }
+
+  return {
+    sessionKey,
+    session: afterSessions[sessionKey] || null,
+    fallback: !freshKey,
+    raw: parsed,
   }
 }
 
@@ -789,6 +1166,7 @@ app.get('/api/health', (req, res) => {
   const logsReadable = fs.existsSync(OPENCLAW_LOG_DIR)
   const reportsDbReady = fs.existsSync(REPORTS_DB_FILE)
   const memoryReady = fs.existsSync(MEMORY_FILE)
+  const cliPathReadable = fs.existsSync(OPENCLAW_CLI_PATH)
 
   res.json({
     status: 'ok',
@@ -802,6 +1180,8 @@ app.get('/api/health', (req, res) => {
       logsReadable,
       reportsDbReady,
       memoryReady,
+      cliPathReadable,
+      cliPath: OPENCLAW_CLI_PATH,
       dataDir: DATA_DIR,
     },
   })
@@ -831,6 +1211,37 @@ app.get('/api/tasks', (req, res) => {
   res.json(readJsonSafe(TASKS_FILE, []))
 })
 
+app.get('/api/artifacts', (req, res) => {
+  if (!fs.existsSync(OPENCLAW_WORKSPACE)) {
+    return res.status(500).json({ error: 'Workspace not found', root: OPENCLAW_WORKSPACE })
+  }
+
+  const limit = Number(req.query.limit || 200)
+  const safeLimit = Math.max(1, Math.min(1000, limit))
+  const artifacts = scanArtifacts(OPENCLAW_WORKSPACE, { maxEntries: safeLimit })
+
+  return res.json({
+    root: OPENCLAW_WORKSPACE,
+    count: artifacts.length,
+    scannedAt: new Date().toISOString(),
+    artifacts,
+  })
+})
+
+app.get('/api/workspaces', (req, res) => {
+  const dockerResult = listDockerContainers()
+  const workspaceResult = listWorkspaceDirectories()
+
+  res.json({
+    root: OPENCLAW_WORKSPACE,
+    scannedAt: new Date().toISOString(),
+    containers: dockerResult.containers,
+    containerError: dockerResult.error,
+    directories: workspaceResult.directories,
+    directoryError: workspaceResult.error,
+  })
+})
+
 app.post('/api/tasks', (req, res) => {
   const body = req.body || {}
   const title = String(body.title || '').trim()
@@ -849,6 +1260,9 @@ app.post('/api/tasks', (req, res) => {
     sessionKey: body.sessionKey ? String(body.sessionKey).slice(0, 240) : null,
     contributors: Array.isArray(body.contributors) ? body.contributors.map((value) => String(value).slice(0, 60)).slice(0, 10) : [],
     modelHints: Array.isArray(body.modelHints) ? body.modelHints.map((value) => String(value).slice(0, 80)).slice(0, 10) : [],
+    lastRunAt: null,
+    lastRunStatus: null,
+    lastRunError: null,
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
   }
@@ -885,6 +1299,9 @@ app.post('/api/tasks/generate', (req, res) => {
       sessionKey: null,
       contributors: ['Zeta'],
       modelHints: ['gpt5.4-inv'],
+      lastRunAt: null,
+      lastRunStatus: null,
+      lastRunError: null,
       createdAt: nowIso,
       updatedAt: nowIso,
     },
@@ -901,6 +1318,9 @@ app.post('/api/tasks/generate', (req, res) => {
       sessionKey: null,
       contributors: ['Cyrus'],
       modelHints: ['gpt5.4-inv'],
+      lastRunAt: null,
+      lastRunStatus: null,
+      lastRunError: null,
       createdAt: nowIso,
       updatedAt: nowIso,
     },
@@ -917,6 +1337,9 @@ app.post('/api/tasks/generate', (req, res) => {
       sessionKey: null,
       contributors: ['Rheon'],
       modelHints: ['gpt5.4-inv'],
+      lastRunAt: null,
+      lastRunStatus: null,
+      lastRunError: null,
       createdAt: nowIso,
       updatedAt: nowIso,
     },
@@ -933,6 +1356,9 @@ app.post('/api/tasks/generate', (req, res) => {
       sessionKey: null,
       contributors: ['Vista'],
       modelHints: ['gpt5.4-inv'],
+      lastRunAt: null,
+      lastRunStatus: null,
+      lastRunError: null,
       createdAt: nowIso,
       updatedAt: nowIso,
     },
@@ -948,6 +1374,122 @@ app.post('/api/tasks/generate', (req, res) => {
     workspace,
     items: generated,
   })
+})
+
+app.post('/api/tasks/:id/run', (req, res) => {
+  const lookup = updateTask(req.params.id, (task) => ({
+    agent: AGENT_RUNTIME_MAP[task.agent] ? task.agent : 'main',
+    status: 'assigned',
+    progress: Math.max(5, Number(task.progress || 0)),
+    lastRunAt: new Date().toISOString(),
+    lastRunStatus: 'queued',
+    lastRunError: null,
+  }))
+
+  if (!lookup) return res.status(404).json({ error: 'Task not found.' })
+
+  try {
+    const dispatch = spawnOpenClawTask(lookup.task)
+    const next = updateTask(req.params.id, (task) => ({
+      status: 'in-progress',
+      progress: Math.max(15, Number(task.progress || 0)),
+      sessionKey: dispatch.sessionKey,
+      lastRunAt: new Date().toISOString(),
+      lastRunStatus: 'running',
+      lastRunError: null,
+    }))
+    appendCommandHistory({
+      id: `task-run-${Date.now()}`,
+      type: 'task-run',
+      command: `openclaw agent --agent ${lookup.task.agent}`,
+      source: 'task-runner',
+      taskId: lookup.task.id,
+      taskTitle: lookup.task.title,
+      state: 'running',
+      sessionKey: dispatch.sessionKey,
+      ranAt: new Date().toISOString(),
+    })
+
+    publishOverview()
+    return res.json({
+      ok: true,
+      task: next?.task || lookup.task,
+      dispatch: {
+        sessionKey: dispatch.sessionKey,
+        fallback: Boolean(dispatch.fallback),
+      },
+    })
+  } catch (error) {
+    const detail =
+      error?.code === 'ENOENT'
+        ? `OpenClaw CLI not found at "${OPENCLAW_CLI_PATH}". Mount host CLI into container or set OPENCLAW_CLI_PATH.`
+        : error?.message || 'Dispatch failed.'
+    const failed = updateTask(req.params.id, (task) => ({
+      status: task.sessionKey ? task.status : 'blocked',
+      lastRunAt: new Date().toISOString(),
+      lastRunStatus: 'failed',
+      lastRunError: detail,
+    }))
+    appendCommandHistory({
+      id: `task-run-${Date.now()}`,
+      type: 'task-run',
+      command: `openclaw agent --agent ${lookup.task.agent}`,
+      source: 'task-runner',
+      taskId: lookup.task.id,
+      taskTitle: lookup.task.title,
+      state: 'failed',
+      error: detail,
+      ranAt: new Date().toISOString(),
+    })
+
+    publishOverview()
+    return res.status(500).json({
+      error: 'Failed to dispatch real task to OpenClaw.',
+      detail,
+      task: failed?.task || lookup.task,
+    })
+  }
+})
+
+app.post('/api/tasks/:id/approve', (req, res) => {
+  const lookup = updateTask(req.params.id, (task) => {
+    const canApprove = task.approvalRequired || task.status === 'waiting-review' || task.status === 'in-progress'
+    if (!canApprove) {
+      return {
+        lastRunAt: new Date().toISOString(),
+        lastRunStatus: task.lastRunStatus || 'noop',
+        lastRunError: 'Approve rejected: task is not in approval flow.',
+      }
+    }
+    return {
+      status: 'done',
+      progress: 100,
+      approvalRequired: false,
+      lastRunAt: new Date().toISOString(),
+      lastRunStatus: 'approved',
+      lastRunError: null,
+    }
+  })
+  if (!lookup) return res.status(404).json({ error: 'Task not found.' })
+  if (lookup.task.status === 'done') {
+    const sessions = normalizeSessions(readGatewayStatus().data)
+    upsertDoneTaskReport(lookup.task, sessions)
+  }
+  publishOverview()
+  return res.json({ ok: true, task: lookup.task })
+})
+
+app.post('/api/tasks/:id/reject', (req, res) => {
+  const lookup = updateTask(req.params.id, () => ({
+    status: 'blocked',
+    approvalRequired: false,
+    lastRunAt: new Date().toISOString(),
+    lastRunStatus: 'rejected',
+    lastRunError: null,
+  }))
+  if (!lookup) return res.status(404).json({ error: 'Task not found.' })
+  publishOverview()
+  return res.json({ ok: true, task: lookup.task })
 })
 
 app.patch('/api/tasks/:id', (req, res) => {
@@ -984,7 +1526,15 @@ app.patch('/api/settings', (req, res) => {
   const current = readJsonSafe(SETTINGS_FILE, DEFAULT_SETTINGS)
   const merged = { ...current }
   for (const [key, value] of Object.entries(req.body || {})) {
-    merged[key] = String(value).slice(0, 180)
+    if (typeof value === 'string') {
+      merged[key] = value.slice(0, 180)
+      continue
+    }
+    if (typeof value === 'number' || typeof value === 'boolean' || value === null) {
+      merged[key] = value
+      continue
+    }
+    merged[key] = JSON.stringify(value).slice(0, 180)
   }
   writeJson(SETTINGS_FILE, merged)
   publishOverview()
@@ -1016,14 +1566,25 @@ app.post('/api/command', (req, res) => {
   }
 
   exec(command, { timeout: 15000, maxBuffer: 1024 * 1024 }, (error, stdout, stderr) => {
-    res.json({
+    const payload = {
       command,
       stdout: stdout || '',
       stderr: stderr || '',
       error: error ? error.message : '',
       code: error?.code ?? 0,
       ranAt: new Date().toISOString(),
+    }
+    appendCommandHistory({
+      id: `cmd-${Date.now()}`,
+      type: 'command',
+      command,
+      state: payload.code === 0 ? 'success' : 'failed',
+      code: payload.code,
+      ranAt: payload.ranAt,
+      stderr: payload.stderr.slice(0, 300),
     })
+    publishOverview()
+    res.json(payload)
   })
 })
 
@@ -1035,4 +1596,3 @@ app.get(/^(?!\/api).*/, (req, res) => {
 app.listen(PORT, HOST, () => {
   console.log(`dash api listening on http://${HOST}:${PORT}`)
 })
-

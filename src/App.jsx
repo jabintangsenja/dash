@@ -114,6 +114,19 @@ function formatSince(value) {
   return `${Math.round(hours / 24)}d ago`
 }
 
+function formatBytes(value) {
+  if (!Number.isFinite(value)) return '-'
+  if (value < 1024) return `${value} B`
+  const units = ['KB', 'MB', 'GB', 'TB']
+  let size = value / 1024
+  let unitIndex = 0
+  while (size >= 1024 && unitIndex < units.length - 1) {
+    size /= 1024
+    unitIndex += 1
+  }
+  return `${size.toFixed(size >= 10 ? 0 : 1)} ${units[unitIndex]}`
+}
+
 function formatLocalDateTime(value) {
   if (!value) return '-'
   const date = new Date(value)
@@ -509,7 +522,7 @@ function DashboardScreen({
   onJumpToLive,
 }) {
   const activeTasks = overview.tasks.filter((task) => task.status !== 'done').slice(0, 3)
-  const recentCommands = overview.tasks.slice(0, 3)
+  const recentCommands = overview.commandHistory || []
 
   return (
     <div className="content-grid dashboard-grid">
@@ -544,16 +557,16 @@ function DashboardScreen({
 
           <Card title="Recent Commands" action={<small>6h window</small>}>
             <div className="stack-gap">
-              {recentCommands.map((task) => (
-                <article key={task.id} className="task-card">
+              {recentCommands.length ? recentCommands.slice(0, 6).map((entry) => (
+                <article key={entry.id} className="task-card">
                   <div className="row-between">
-                    <h4>{task.title}</h4>
-                    <StatusChip text={prettyLabel(task.status)} tone={task.status} />
+                    <h4>{entry.command}</h4>
+                    <StatusChip text={prettyLabel(entry.state || entry.type || 'info')} tone={entry.state || entry.type || 'info'} />
                   </div>
-                  <p>{task.description || 'No summary.'}</p>
-                  <small>{prettyLabel(task.agent)} | {formatSince(task.updatedAt || task.createdAt)}</small>
+                  <p>{entry.taskTitle || entry.source || 'Runtime command execution'}</p>
+                  <small>{entry.code !== undefined ? `code ${entry.code}` : '-'} | {formatSince(entry.ranAt)}</small>
                 </article>
-              ))}
+              )) : <p>No command history yet.</p>}
             </div>
           </Card>
         </div>
@@ -626,7 +639,7 @@ function DashboardScreen({
   )
 }
 
-function CommandCenterScreen({ selectedTask, overview, onTaskPatch, onOpenTask }) {
+function CommandCenterScreen({ selectedTask, overview, onTaskPatch, onOpenTask, onRunTask, actionState }) {
   const fallbackTask = selectedTask || overview.tasks[0] || null
 
   if (!fallbackTask) {
@@ -660,10 +673,20 @@ function CommandCenterScreen({ selectedTask, overview, onTaskPatch, onOpenTask }
 
         <Card title="Linked Session">
           <pre className="code-box">{relatedSession ? JSON.stringify(relatedSession, null, 2) : 'No linked session'}</pre>
+          <div className="top-gap">
+            <small>
+              Last run: {fallbackTask.lastRunStatus || 'never'}
+              {fallbackTask.lastRunAt ? ` · ${formatSince(fallbackTask.lastRunAt)}` : ''}
+            </small>
+            {fallbackTask.lastRunError && <pre className="code-box">{fallbackTask.lastRunError}</pre>}
+          </div>
         </Card>
 
         <Card title="Execution Controls">
           <div className="mini-actions wrap-actions">
+            <button className="btn-primary" onClick={() => onRunTask(fallbackTask)} disabled={actionState.runningTaskId === fallbackTask.id}>
+              {actionState.runningTaskId === fallbackTask.id ? 'Running...' : 'Run Task'}
+            </button>
             <button className="btn-success" onClick={() => onTaskPatch(fallbackTask.id, { status: 'done', progress: 100 })}>
               Mark Done
             </button>
@@ -710,7 +733,7 @@ function CommandCenterScreen({ selectedTask, overview, onTaskPatch, onOpenTask }
   )
 }
 
-function KanbanScreen({ tasks, onOpenTask, onTaskPatch, onCreateTask, onGenerateTasks }) {
+function KanbanScreen({ tasks, onOpenTask, onTaskPatch, onCreateTask, onGenerateTasks, onRunTask, actionState }) {
   const columns = KANBAN_COLUMNS
   const workspaceOptions = ['all', ...WORKSPACE_PRESETS]
   const [search, setSearch] = useState('')
@@ -829,6 +852,11 @@ function KanbanScreen({ tasks, onOpenTask, onTaskPatch, onCreateTask, onGenerate
                     <button className="btn-ghost" onClick={() => onOpenTask(task)}>
                       Open
                     </button>
+                    {task.status !== 'done' && (
+                      <button className="btn-primary" onClick={() => onRunTask(task)} disabled={actionState.runningTaskId === task.id}>
+                        {actionState.runningTaskId === task.id ? 'Running...' : 'Run Task'}
+                      </button>
+                    )}
                     {column !== 'done' && <button className="btn-success" onClick={() => quickMove(task.id, 'done')}>Done</button>}
                     {column === 'inbox' && <button className="btn-ghost" onClick={() => quickMove(task.id, 'todo')}>To Do</button>}
                     {column === 'todo' && <button className="btn-ghost" onClick={() => quickMove(task.id, 'in-progress')}>Start</button>}
@@ -851,31 +879,68 @@ function KanbanScreen({ tasks, onOpenTask, onTaskPatch, onCreateTask, onGenerate
   )
 }
 
-function ArtifactsScreen({ overview }) {
-  const artifacts = [
-    ...overview.logs.slice(0, 5).map((line, index) => ({
-      name: `log-${index + 1}.txt`,
-      meta: 'OpenClaw runtime log',
-      preview: line.slice(0, 96),
-    })),
-    ...overview.sessions.slice(0, 4).map((session) => ({
-      name: `${session.agent}-${session.id}.json`,
-      meta: session.model,
-      preview: session.sessionKey,
-    })),
-  ]
+function ArtifactsScreen() {
+  const [artifacts, setArtifacts] = useState([])
+  const [meta, setMeta] = useState({ root: '', scannedAt: null, count: 0 })
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  const loadArtifacts = useCallback(async () => {
+    try {
+      setLoading(true)
+      const response = await fetch('/api/artifacts')
+      if (!response.ok) throw new Error('Failed to load artifacts')
+      const data = await response.json()
+      const list = Array.isArray(data) ? data : data.artifacts || []
+      setArtifacts(list)
+      setMeta({
+        root: data.root || '',
+        scannedAt: data.scannedAt || null,
+        count: typeof data.count === 'number' ? data.count : list.length,
+      })
+      setError('')
+    } catch (loadError) {
+      setError(loadError.message || 'Failed to load artifacts')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    loadArtifacts()
+    const interval = setInterval(loadArtifacts, 30000)
+    return () => clearInterval(interval)
+  }, [loadArtifacts])
 
   return (
     <div className="content-grid">
       <div className="main-stack">
-        <Card title="Artifacts Library">
+        <Card
+          title="Artifacts Library"
+          action={
+            <button className="btn-ghost" onClick={loadArtifacts}>
+              Refresh
+            </button>
+          }
+        >
           <div className="feed-list">
+            {loading && <p className="muted">Loading artifacts...</p>}
+            {error && <p className="muted">{error}</p>}
+            {!loading && !error && artifacts.length === 0 && (
+              <p className="muted">No artifacts found.</p>
+            )}
             {artifacts.map((artifact) => (
               <FeedRow
-                key={artifact.name}
+                key={`${artifact.path || artifact.name}`}
                 item={{
-                  title: artifact.name,
-                  subtitle: `${artifact.meta} - ${artifact.preview}`,
+                  title: artifact.path || artifact.name,
+                  subtitle: [
+                    artifact.extension ? artifact.extension.toUpperCase() : 'FILE',
+                    formatBytes(artifact.size),
+                    artifact.modifiedAt ? `updated ${formatSince(artifact.modifiedAt)}` : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' · '),
                   state: 'info',
                 }}
               />
@@ -887,7 +952,9 @@ function ArtifactsScreen({ overview }) {
       <aside className="right-stack">
         <Card title="Preview">
           <div className="preview-box">
-            <p>Artifacts are inferred from sessions and logs.</p>
+            <p>{meta.root ? `Workspace: ${meta.root}` : 'Workspace scan ready.'}</p>
+            <p>{meta.count ? `${meta.count} artifacts available.` : 'No artifacts cached.'}</p>
+            {meta.scannedAt && <p>Last scan {formatSince(meta.scannedAt)}.</p>}
           </div>
         </Card>
       </aside>
@@ -896,32 +963,118 @@ function ArtifactsScreen({ overview }) {
 }
 
 function WorkspacesScreen({ overview }) {
-  const workspaces = [
-    { name: overview.workspace, members: `${overview.agents.length} agents`, state: 'Active' },
-    { name: 'Finance Dashboard', members: '2 services', state: 'Active' },
-    { name: 'Memory', members: 'workspace files', state: 'Ready' },
-  ]
+  const [workspaces, setWorkspaces] = useState({
+    root: '',
+    scannedAt: '',
+    containers: [],
+    directories: [],
+    containerError: '',
+    directoryError: '',
+  })
+  const [loading, setLoading] = useState(false)
+  const [error, setError] = useState('')
+
+  const loadWorkspaces = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const response = await fetch('/api/workspaces')
+      if (!response.ok) throw new Error('Failed to load workspaces data.')
+      const payload = await response.json()
+      setWorkspaces(payload)
+    } catch (err) {
+      setError(err.message || 'Unable to load workspaces data.')
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    loadWorkspaces()
+  }, [loadWorkspaces])
+
+  const directoryRows = workspaces.directories || []
+  const containerRows = workspaces.containers || []
 
   return (
     <div className="content-grid">
       <div className="main-stack">
-        <Card title="Workspaces">
+        <Card
+          title="Workspace Directories"
+          action={
+            <button className="btn-ghost" onClick={loadWorkspaces}>
+              Refresh
+            </button>
+          }
+        >
           <div className="feed-list">
-            {workspaces.map((workspace) => (
+            {loading && <p className="muted">Loading workspace directories...</p>}
+            {error && <p className="muted">{error}</p>}
+            {!loading && !error && !directoryRows.length && (
+              <p className="muted">No directories found.</p>
+            )}
+            {workspaces.directoryError && <p className="muted">{workspaces.directoryError}</p>}
+            {directoryRows.map((entry) => (
               <FeedRow
-                key={workspace.name}
+                key={entry.name}
                 item={{
-                  title: workspace.name,
-                  subtitle: workspace.members,
-                  state: workspace.state,
+                  title: entry.name,
+                  subtitle: [
+                    entry.path ? `path: ${entry.path}` : null,
+                    entry.modifiedAt ? `updated ${formatSince(entry.modifiedAt)}` : null,
+                    Number.isFinite(entry.size) ? formatBytes(entry.size) : null,
+                  ]
+                    .filter(Boolean)
+                    .join(' · '),
+                  state: 'Ready',
                 }}
               />
             ))}
           </div>
         </Card>
+
+        <Card title="Docker Containers">
+          <div className="feed-list">
+            {loading && <p className="muted">Loading container list...</p>}
+            {!loading && !containerRows.length && (
+              <p className="muted">No running containers found.</p>
+            )}
+            {workspaces.containerError && <p className="muted">{workspaces.containerError}</p>}
+            {containerRows.map((container) => {
+              const statusText = container.Status || ''
+              const isUp = /up/i.test(statusText)
+              return (
+                <FeedRow
+                  key={container.ID || container.Names}
+                  item={{
+                    title: container.Names || container.ID || 'container',
+                    subtitle: [
+                      container.Image,
+                      statusText,
+                      container.RunningFor,
+                      container.Ports ? `ports: ${container.Ports}` : null,
+                    ]
+                      .filter(Boolean)
+                      .join(' · '),
+                    state: isUp ? 'Active' : 'Idle',
+                  }}
+                />
+              )
+            })}
+          </div>
+        </Card>
       </div>
 
       <aside className="right-stack">
+        <Card title="Workspace Summary">
+          <ul className="list-plain">
+            <li>Root: {workspaces.root || 'unknown'}</li>
+            <li>Directories: {directoryRows.length}</li>
+            <li>Containers: {containerRows.length}</li>
+            <li>Last scan: {workspaces.scannedAt ? formatSince(workspaces.scannedAt) : 'n/a'}</li>
+          </ul>
+        </Card>
+
         <Card title="Gateway Summary">
           <ul className="list-plain">
             <li>Connected: {overview.gateway.connected ? 'Yes' : 'No'}</li>
@@ -1092,6 +1245,7 @@ function AppShell() {
     tasks: [],
     approvals: [],
     activity: [],
+    commandHistory: [],
     reports: [],
     reportSummary: { doneTasks: 0, lastReportAt: null },
     productivity: {},
@@ -1111,12 +1265,27 @@ function AppShell() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [streamConnected, setStreamConnected] = useState(false)
+  const [actionState, setActionState] = useState({ runningTaskId: null })
+
+  const apiRequest = useCallback(async (url, options = {}) => {
+    const method = String(options.method || 'GET').toUpperCase()
+    const headers = {
+      ...(options.headers || {}),
+    }
+    if (method !== 'GET' && method !== 'HEAD') {
+      headers['X-OpenClaw-Action'] = '1'
+      if (!headers['Content-Type'] && options.body) {
+        headers['Content-Type'] = 'application/json'
+      }
+    }
+    return fetch(url, { ...options, method, headers })
+  }, [])
 
   const loadOverview = useCallback(async () => {
     try {
       const [overviewData, settingsData] = await Promise.all([
-        fetch('/api/overview').then((response) => response.json()),
-        fetch('/api/settings').then((response) => response.json()),
+        apiRequest('/api/overview').then((response) => response.json()),
+        apiRequest('/api/settings').then((response) => response.json()),
       ])
       setOverview(overviewData)
       setSettings(settingsData)
@@ -1130,16 +1299,31 @@ function AppShell() {
     } finally {
       setLoading(false)
     }
-  }, [selectedTask])
+  }, [apiRequest, selectedTask])
 
   useEffect(() => {
     loadOverview()
-    const fallback = setInterval(loadOverview, 30000)
+    let fallback = null
+    function ensureFallback() {
+      if (!fallback) {
+        fallback = setInterval(loadOverview, 30000)
+      }
+    }
+    function clearFallback() {
+      if (fallback) {
+        clearInterval(fallback)
+        fallback = null
+      }
+    }
 
     const stream = new EventSource('/api/stream')
-    stream.addEventListener('hello', () => setStreamConnected(true))
+    stream.addEventListener('hello', () => {
+      setStreamConnected(true)
+      clearFallback()
+    })
     stream.addEventListener('overview', (event) => {
       setStreamConnected(true)
+      clearFallback()
       try {
         const incoming = JSON.parse(event.data)
         setOverview(incoming)
@@ -1147,18 +1331,20 @@ function AppShell() {
         // ignore malformed stream events
       }
     })
-    stream.onerror = () => setStreamConnected(false)
+    stream.onerror = () => {
+      setStreamConnected(false)
+      ensureFallback()
+    }
 
     return () => {
-      clearInterval(fallback)
+      clearFallback()
       stream.close()
     }
   }, [loadOverview])
 
   async function patchTask(taskId, patch) {
-    await fetch(`/api/tasks/${taskId}`, {
+    await apiRequest(`/api/tasks/${taskId}`, {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(patch),
     })
     await loadOverview()
@@ -1166,9 +1352,8 @@ function AppShell() {
 
   async function createTask(title, description, options = {}) {
     if (!title.trim()) return
-    await fetch('/api/tasks', {
+    await apiRequest('/api/tasks', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         title,
         description,
@@ -1184,13 +1369,33 @@ function AppShell() {
   }
 
   async function saveSettings(nextSettings) {
-    const response = await fetch('/api/settings', {
+    const response = await apiRequest('/api/settings', {
       method: 'PATCH',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(nextSettings),
     })
     const data = await response.json()
     setSettings(data)
+  }
+
+  async function runTask(task) {
+    setActionState({ runningTaskId: task.id })
+    try {
+      const response = await apiRequest(`/api/tasks/${task.id}/run`, {
+        method: 'POST',
+      })
+      const data = await response.json()
+      if (!response.ok) {
+        throw new Error(data.detail || data.error || 'Failed to run task.')
+      }
+      await loadOverview()
+      if (data.task) setSelectedTask(data.task)
+      setCommandOutput(`Run Task success: ${task.title}\nSession: ${data.dispatch?.sessionKey || data.task?.sessionKey || '-'}`)
+    } catch (error) {
+      await loadOverview()
+      setCommandOutput(`Run Task failed: ${task.title}\n${error.message || 'Unknown error.'}`)
+    } finally {
+      setActionState({ runningTaskId: null })
+    }
   }
 
   async function runCommand(commandOverride) {
@@ -1203,9 +1408,8 @@ function AppShell() {
     }
 
     if (commandOverride) setCommand(baseCommand)
-    const response = await fetch('/api/command', {
+    const response = await apiRequest('/api/command', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ command: effectiveCommand }),
     })
     const data = await response.json()
@@ -1250,21 +1454,25 @@ function AppShell() {
   }
 
   async function approveTask(task) {
-    await patchTask(task.id, { status: 'done', progress: 100, approvalRequired: false })
+    const response = await apiRequest(`/api/tasks/${task.id}/approve`, { method: 'POST' })
+    if (!response.ok) {
+      const data = await response.json().catch(() => ({}))
+      setCommandOutput(`Approve failed: ${data.error || response.statusText}`)
+      return
+    }
+    await loadOverview()
     setCommandOutput(`Approved: ${task.title}`)
   }
 
   async function rejectTask(task) {
-    await patchTask(task.id, { status: 'blocked', approvalRequired: false })
+    await apiRequest(`/api/tasks/${task.id}/reject`, { method: 'POST' })
+    await loadOverview()
     setCommandOutput(`Rejected: ${task.title} moved to blocked`)
   }
 
   async function rerunTask(task) {
-    await patchTask(task.id, {
-      status: 'in-progress',
-      approvalRequired: false,
-      progress: Math.min(95, Math.max(20, Number(task.progress || 0))),
-    })
+    await patchTask(task.id, { status: 'assigned', approvalRequired: false })
+    await runTask(task)
     setSelectedTask(task)
     navigate('/command-center')
   }
@@ -1275,12 +1483,9 @@ function AppShell() {
       setCommandOutput('No lock detected. Nothing to resolve.')
       return
     }
-    await patchTask(lockedTask.id, {
-      status: 'in-progress',
-      approvalRequired: false,
-      progress: Math.max(30, Number(lockedTask.progress || 0)),
-    })
-    setCommandOutput(`Resolved lock on task: ${lockedTask.title}`)
+    await patchTask(lockedTask.id, { status: 'assigned', approvalRequired: false })
+    await runTask(lockedTask)
+    setCommandOutput(`Resolved lock and re-dispatched: ${lockedTask.title}`)
   }
 
   function viewEdgePayload(edge, edgeInfo) {
@@ -1289,8 +1494,14 @@ function AppShell() {
     )
   }
 
-  async function replayEdge(edge, edgeInfo) {
-    await runCommand(`echo replay ${edge.id} ${edgeInfo.reason}`)
+  async function replayEdge(edge) {
+    const routedTask = overview.tasks.find((task) => task.agent === edge.to && task.status !== 'done') || overview.tasks.find((task) => task.status !== 'done')
+    if (!routedTask) {
+      setCommandOutput(`Replay skipped: no active task for edge ${edge.id}`)
+      return
+    }
+    await runTask(routedTask)
+    setCommandOutput(`Replay edge ${edge.id} -> task ${routedTask.title}`)
   }
 
   async function retryLoop() {
@@ -1299,12 +1510,9 @@ function AppShell() {
       setCommandOutput('No blocked task found for retry.')
       return
     }
-    await patchTask(blockedTask.id, {
-      status: 'in-progress',
-      progress: Math.max(35, Number(blockedTask.progress || 0)),
-      approvalRequired: false,
-    })
-    setCommandOutput(`Retry started: ${blockedTask.title}`)
+    await patchTask(blockedTask.id, { status: 'assigned', approvalRequired: false })
+    await runTask(blockedTask)
+    setCommandOutput(`Retry dispatched: ${blockedTask.title}`)
   }
 
   function openTraceback() {
@@ -1316,9 +1524,8 @@ function AppShell() {
   }
 
   async function generateTasks(workspaceName) {
-    const response = await fetch('/api/tasks/generate', {
+    const response = await apiRequest('/api/tasks/generate', {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ workspace: workspaceName }),
     })
     const data = await response.json()
@@ -1471,7 +1678,7 @@ function AppShell() {
                 />
                 <Route
                   path="/command-center"
-                  element={<CommandCenterScreen selectedTask={selectedTask} overview={overview} onTaskPatch={patchTask} onOpenTask={openTask} />}
+                  element={<CommandCenterScreen selectedTask={selectedTask} overview={overview} onTaskPatch={patchTask} onOpenTask={openTask} onRunTask={runTask} actionState={actionState} />}
                 />
                 <Route
                   path="/kanban"
@@ -1482,10 +1689,12 @@ function AppShell() {
                       onTaskPatch={patchTask}
                       onCreateTask={createTask}
                       onGenerateTasks={generateTasks}
+                      onRunTask={runTask}
+                      actionState={actionState}
                     />
                   }
                 />
-                <Route path="/artifacts" element={<ArtifactsScreen overview={overview} />} />
+                <Route path="/artifacts" element={<ArtifactsScreen />} />
                 <Route path="/workspaces" element={<WorkspacesScreen overview={overview} />} />
                 <Route path="/reports" element={<ReportsScreen overview={overview} />} />
                 <Route path="/activity-logs" element={<ActivityLogsScreen overview={overview} />} />
@@ -1503,6 +1712,3 @@ function AppShell() {
 export default function App() {
   return <AppShell />
 }
-
-
-

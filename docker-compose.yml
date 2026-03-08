@@ -9,10 +9,15 @@ services:
       PORT: 7070
       OPENCLAW_ROOT: /host-openclaw
       OPENCLAW_WORKSPACE: /host-openclaw/workspace
+      OPENCLAW_STATE_DIR: /host-openclaw
+      OPENCLAW_CONFIG_PATH: /host-openclaw/openclaw.json
+      OPENCLAW_CLI_PATH: /usr/local/bin/openclaw
       OPENCLAW_STATUS_PATH: /host-openclaw/workspace/.trash-command-center-20260308-111359/data/gateway-status.json
       OPENCLAW_LOG_DIR: /tmp/openclaw
     volumes:
       - ./data:/app/data
-      - /root/.openclaw:/host-openclaw:ro
+      - /root/.openclaw:/host-openclaw
+      - /usr/local/bin/openclaw:/usr/local/bin/openclaw:ro
+      - /usr/local/lib/node_modules/openclaw:/usr/local/lib/node_modules/openclaw:ro
       - /tmp/openclaw:/tmp/openclaw:ro
     restart: unless-stopped
