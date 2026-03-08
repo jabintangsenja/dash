@@ -430,15 +430,27 @@ small {
 }
 
 .agent-row {
-  flex-direction: row;
+  gap: 8px;
+}
+
+.agent-head {
+  display: flex;
+  align-items: center;
   justify-content: space-between;
+  gap: 8px;
+}
+
+.agent-task {
+  margin: 0;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .agent-meta {
   display: flex;
-  flex-direction: column;
-  align-items: flex-end;
-  gap: 6px;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
 }
 
 .list-plain {

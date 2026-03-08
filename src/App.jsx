@@ -112,12 +112,12 @@ function FeedRow({ item, actionLabel = 'Open', onAction }) {
 function AgentRow({ agent }) {
   return (
     <article className="agent-row">
-      <div>
+      <div className="agent-head">
         <strong>{agent.name}</strong>
-        <p>{agent.currentTask}</p>
-      </div>
-      <div className="agent-meta">
         <StatusChip text={agent.status} tone={agent.status} />
+      </div>
+      <p className="agent-task">{agent.currentTask}</p>
+      <div className="agent-meta">
         <small>{agent.model}</small>
         <small>{agent.updatedAt ? formatSince(agent.updatedAt) : 'No active session'}</small>
       </div>
