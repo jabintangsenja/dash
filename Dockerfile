@@ -12,6 +12,7 @@ FROM node:22-alpine
 WORKDIR /app
 ENV NODE_ENV=production
 ENV PORT=7070
+RUN apk add --no-cache bash
 
 COPY --from=build /app/package*.json ./
 COPY --from=build /app/node_modules ./node_modules
