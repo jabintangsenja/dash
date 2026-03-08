@@ -19,5 +19,6 @@ services:
       - /root/.openclaw:/host-openclaw
       - /usr/local/bin/openclaw:/usr/local/bin/openclaw:ro
       - /usr/local/lib/node_modules/openclaw:/usr/local/lib/node_modules/openclaw:ro
+      - /root/.nvm/versions/node/v22.22.0:/root/.nvm/versions/node/v22.22.0:ro
       - /tmp/openclaw:/tmp/openclaw:ro
     restart: unless-stopped
