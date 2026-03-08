@@ -3,13 +3,13 @@ services:
     build: .
     container_name: openclaw-ui
     ports:
-      - "7070:7070"
+      - 7070:7070
     environment:
       NODE_ENV: production
       PORT: 7070
       OPENCLAW_ROOT: /host-openclaw
       OPENCLAW_WORKSPACE: /host-openclaw/workspace
-      OPENCLAW_STATUS_PATH: /host-openclaw/workspace/gateway-status.json
+      OPENCLAW_STATUS_PATH: /host-openclaw/workspace/.trash-command-center-20260308-111359/data/gateway-status.json
       OPENCLAW_LOG_DIR: /tmp/openclaw
     volumes:
       - ./data:/app/data
